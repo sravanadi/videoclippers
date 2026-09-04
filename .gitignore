@@ -8,4 +8,6 @@ venv/
 *.mp4
 *.webm
 *.mov
-
+__pycache__/
+*.py[cod]
+tsconfig.tsbuildinfo

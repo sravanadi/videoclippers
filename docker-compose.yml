@@ -18,9 +18,7 @@ services:
     restart: unless-stopped
 
   whisper-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.whisper
+    image: videoclippers-whisper-server:latest
     container_name: videoclipper-whisper
     ports:
       - "8001:8000"
@@ -28,8 +26,11 @@ services:
       - WHISPER_MODEL=base
       - PORT=8000
       - HOST=0.0.0.0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - whisper_hf_cache:/root/.cache/huggingface
+      - ./scripts:/app/scripts
     deploy:
       resources:
         reservations:

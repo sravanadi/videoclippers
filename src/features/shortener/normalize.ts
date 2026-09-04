@@ -141,24 +141,21 @@ const normalizeTranscriptWordList = (
   words: TranscriptWord[] | undefined | null
 ): TranscriptWord[] => {
   if (!Array.isArray(words)) return [];
-  return words
-    .map((word) => {
-      const text = word?.text?.trim();
-      if (!text) return null;
-      const start = Number.parseFloat(String(word?.start ?? 0));
-      const end = Number.parseFloat(String(word?.end ?? 0));
-      if (!Number.isFinite(start) || !Number.isFinite(end)) {
-        return null;
-      }
-      return {
-        text,
-        start,
-        end,
-        speaker_id: word?.speaker_id ?? null,
-      };
-    })
-    .filter((word): word is TranscriptWord => Boolean(word))
-    .sort((a, b) => a.start - b.start);
+  const result: TranscriptWord[] = [];
+  for (const word of words) {
+    const text = word?.text?.trim();
+    if (!text) continue;
+    const start = Number.parseFloat(String(word?.start ?? 0));
+    const end = Number.parseFloat(String(word?.end ?? 0));
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    result.push({
+      text,
+      start,
+      end,
+      speaker_id: word?.speaker_id ?? null,
+    });
+  }
+  return result.sort((a, b) => a.start - b.start);
 };
 
 const slugifyId = (value: string): string =>

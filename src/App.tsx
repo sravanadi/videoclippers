@@ -58,6 +58,7 @@ import HighlightPicker from "@/components/shortener/highlight-picker";
 import ProcessingStatusCard from "@/components/shortener/processing-status-card";
 import PreviewCanvas from "@/components/shortener/preview-canvas";
 import { ExportProgressModal } from "@/components/shortener/export-progress-modal";
+import VideoEnhancementCard from "@/components/shortener/video-enhancement-card";
 import {
   COLOR_GRADE_PRESETS,
   applyColorGradeToEngineBlock,
@@ -272,6 +273,7 @@ export default function App() {
     useState<CaptionStylePresetId>("karaoke_highlight");
   const [exportResolution, setExportResolution] =
     useState<"1080p" | "4k">("1080p");
+  const [exportEngine, setExportEngine] = useState<"gpu" | "cesdk">("gpu");
   const [multiShorts, setMultiShorts] = useState<ShortClipCandidate[]>([]);
   const [activeShortClipId, setActiveShortClipId] = useState<string | null>(null);
   const [isMultiShortDrawerOpen, setIsMultiShortDrawerOpen] = useState(false);
@@ -5992,7 +5994,7 @@ export default function App() {
         engine.block.appendChild(trackId, captionEntry);
       }
     });
-    applyCaptionVisibility(captionsEnabled && effectiveStyle !== "none", engine);
+    applyCaptionVisibility(captionsEnabled && (effectiveStyle as any) !== "none", engine);
   };
 
   const styleCaptionEntry = (
@@ -6127,7 +6129,7 @@ export default function App() {
       }
       if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
         const children = engine.block.getChildren(videoTrackRef.current) ?? [];
-        children.forEach((c) => {
+        children.forEach((c: number) => {
           if (engine.block.isValid(c)) blocksToGrade.push(c);
         });
       }
@@ -6525,23 +6527,127 @@ export default function App() {
     setExportClipTitle(title);
     setExportClipDuration(duration);
     setExportProgress(1);
-    setExportStatusText("Initializing hardware video encoder...");
+    setExportStatusText(
+      exportEngine === "gpu"
+        ? "Offloading to NVIDIA GeForce RTX 3050 hardware encoder (h264_nvenc)..."
+        : "Initializing in-browser video encoder..."
+    );
     setIsExportComplete(false);
     setIsExportModalOpen(true);
     setIsExporting(true);
     setExportError(null);
 
+    // Fast NVIDIA GPU NVENC Hardware Acceleration path
+    if (exportEngine === "gpu" && videoFile) {
+      const startTime = currentShort?.startTime ?? 0;
+      const endTime = currentShort?.endTime ?? (startTime + duration);
+
+      const formData = new FormData();
+      formData.append("file", videoFile);
+      formData.append("start_time", startTime.toString());
+      formData.append("end_time", endTime.toString());
+      formData.append("aspect_ratio", targetAspectRatioId);
+      formData.append("resolution", exportResolution);
+      formData.append("color_preset", activeColorGrade);
+      formData.append("brightness", (colorGradeSettings.exposure ?? 0).toString());
+      formData.append("contrast", (colorGradeSettings.contrast ?? 0).toString());
+      formData.append("saturation", (colorGradeSettings.saturation ?? 0).toString());
+      formData.append("temperature", (colorGradeSettings.temperature ?? 0).toString());
+      formData.append("tint", "0");
+      formData.append("clip_title", title.replace(/[^a-zA-Z0-9_-]/g, "_"));
+
+      if (captionsEnabled && currentTranscriptWords.length > 0) {
+        const clipWords = currentTranscriptWords.filter(
+          (w) => w.start >= startTime - 0.2 && w.end <= endTime + 0.2
+        );
+        if (clipWords.length > 0) {
+          let srtContent = "";
+          let idx = 1;
+          for (let i = 0; i < clipWords.length; i += 4) {
+            const chunk = clipWords.slice(i, i + 4);
+            const cStart = Math.max(0, chunk[0].start - startTime);
+            const cEnd = Math.max(cStart + 0.5, chunk[chunk.length - 1].end - startTime);
+            const formatSrtTime = (sec: number) => {
+              const hrs = Math.floor(sec / 3600).toString().padStart(2, "0");
+              const mins = Math.floor((sec % 3600) / 60).toString().padStart(2, "0");
+              const secs = Math.floor(sec % 60).toString().padStart(2, "0");
+              const ms = Math.floor((sec % 1) * 1000).toString().padStart(3, "0");
+              return `${hrs}:${mins}:${secs},${ms}`;
+            };
+            const text = chunk.map((w) => w.text).join(" ");
+            srtContent += `${idx}\n${formatSrtTime(cStart)} --> ${formatSrtTime(cEnd)}\n${text}\n\n`;
+            idx++;
+          }
+          formData.append("subtitles_srt", srtContent);
+        }
+      }
+
+      setExportProgress(15);
+      const progressTimer = setInterval(() => {
+        setExportProgress((prev) => {
+          if (prev >= 92) return prev;
+          return prev + Math.floor(Math.random() * 8 + 4);
+        });
+      }, 350);
+
+      try {
+        const response = await fetch("/api/export-gpu", {
+          method: "POST",
+          body: formData,
+          signal: AbortSignal.timeout(600000), // 10 minutes timeout
+        });
+
+        clearInterval(progressTimer);
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => null);
+          throw new Error(errData?.detail || errData?.error || `GPU export failed (${response.status})`);
+        }
+
+        const blob = await response.blob();
+        setExportProgress(100);
+        setExportStatusText("Video export complete! (NVIDIA RTX 3050 NVENC)");
+        setIsExportComplete(true);
+
+        const url = URL.createObjectURL(blob);
+        setExportedVideoUrl(url);
+        const link = document.createElement("a");
+        const baseName = title.replace(/[^a-zA-Z0-9_-]/g, "_");
+        link.href = url;
+        link.download = `${baseName}_${exportResolution}.mp4`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setIsExporting(false);
+        return;
+      } catch (gpuErr) {
+        clearInterval(progressTimer);
+        console.warn("GPU export encountered an error, falling back to CE.SDK in-browser export:", gpuErr);
+        setExportStatusText("GPU server busy; rendering via CE.SDK Canvas...");
+      }
+    }
+
     try {
+      // Configure 10-minute inactivity timeout on CE.SDK engine before exporting
+      try {
+        if (typeof (engine as any).unstable_setVideoExportInactivityTimeout === "function") {
+          (engine as any).unstable_setVideoExportInactivityTimeout(600000);
+        }
+        if (typeof (engine as any).unstable_setExportInactivityTimeout === "function") {
+          (engine as any).unstable_setExportInactivityTimeout(600000);
+        }
+      } catch (timeoutErr) {
+        console.warn("Could not set engine inactivity timeout", timeoutErr);
+      }
+
       const is4K = exportResolution === "4k";
       const is916 = targetAspectRatioId === "9:16";
       const is169 = targetAspectRatioId === "16:9";
       const is11 = targetAspectRatioId === "1:1";
 
-      // Hardware NVENC-safe dimensions (prevents software fallback and 2-hour browser lockups)
-      // YouTube Shorts & mobile players natively consume 1080x1920.
       let targetWidth = 1080;
       let targetHeight = 1920;
-      let videoBitrate = is4K ? 22000000 : 12000000; // 22 Mbps for 4K quality look, 12 Mbps for standard 1080p
+      let videoBitrate = is4K ? 22000000 : 12000000;
 
       if (is916) {
         targetWidth = 1080;
@@ -6573,8 +6679,7 @@ export default function App() {
         }
       };
 
-      const exportOptions = {
-        mimeType: "video/mp4",
+      const cleanVideoOptions = {
         timeOffset: 0,
         duration: duration,
         framerate: 30,
@@ -6582,14 +6687,40 @@ export default function App() {
         targetHeight,
         videoBitrate,
         audioBitrate: 192000,
-        h264Profile: 77, // Main Profile: universal hardware NVENC / WebCodecs acceleration
+        h264Profile: 77,
         h264Level: 42,
-        onProgress: handleProgress,
-        progressCallback: handleProgress,
       };
 
-      // Call CE.SDK exportVideo with options containing onProgress
-      const blob = await (engine.block as any).exportVideo(pageId, exportOptions, handleProgress);
+      let blob: Blob;
+      try {
+        // Preferred CE.SDK signature: exportVideo(handle, mimeType, progressCallback, options)
+        blob = await (engine.block as any).exportVideo(
+          pageId,
+          "video/mp4",
+          handleProgress,
+          cleanVideoOptions
+        );
+      } catch (errSig1) {
+        console.warn("exportVideo(handle, mimeType, progressCallback, options) failed, trying export(handle, options):", errSig1);
+        try {
+          // Modern CE.SDK unified export: export(handle, options)
+          blob = await (engine.block as any).export(pageId, {
+            mimeType: "video/mp4",
+            ...cleanVideoOptions,
+            onProgress: (progress: number) => {
+              const pct = Math.min(99, Math.max(1, Math.round(progress * 100)));
+              setExportProgress(pct);
+              setExportStatusText(`Encoding video (${pct}%)...`);
+            },
+          });
+        } catch (errSig2) {
+          console.warn("export(handle, options) failed, trying exportVideo(handle, options):", errSig2);
+          blob = await (engine.block as any).exportVideo(pageId, {
+            mimeType: "video/mp4",
+            ...cleanVideoOptions,
+          });
+        }
+      }
 
       setExportProgress(100);
       setExportStatusText("Video export complete!");
@@ -6926,7 +7057,7 @@ export default function App() {
       // Dynamically re-scale all active captions to fit the new aspect ratio perfectly
       if (engine && captionsTrackRef.current && engine.block.isValid(captionsTrackRef.current)) {
         const captionChildren = engine.block.getChildren(captionsTrackRef.current) ?? [];
-        captionChildren.forEach((childId) => {
+        captionChildren.forEach((childId: number) => {
           if (engine.block.isValid(childId)) {
             styleCaptionEntry(childId, undefined, ratioId);
           }
@@ -7427,6 +7558,22 @@ export default function App() {
                           </div>
                         </div>
                       </div>
+                      <VideoEnhancementCard
+                        activeColorGrade={activeColorGrade}
+                        isAutoGrading={isAutoColorGradeEnabled}
+                        colorGradeSettings={colorGradeSettings}
+                        onSelectColorGrade={handleSelectColorGrade}
+                        onToggleAutoGrade={handleToggleAutoGrade}
+                        onUpdateColorGradeSettings={handleUpdateColorGradeSettings}
+                        activeCaptionStyle={activeCaptionStyle}
+                        onSelectCaptionStyle={handleSelectCaptionStyle}
+                        exportResolution={exportResolution}
+                        onToggleExportResolution={() =>
+                          setExportResolution((prev) => (prev === "1080p" ? "4k" : "1080p"))
+                        }
+                        exportEngine={exportEngine}
+                        onChangeExportEngine={setExportEngine}
+                      />
                       <Button
                         type="button"
                         variant="outline"
@@ -7554,7 +7701,7 @@ export default function App() {
           isComplete={isExportComplete}
           error={exportError}
           clipTitle={exportClipTitle}
-          aspectRatio={`${targetAspectRatioId} • ${exportResolution.toUpperCase()}`}
+          aspectRatio={`${targetAspectRatioId} • ${exportResolution.toUpperCase()} • ${exportEngine === "gpu" ? "RTX 3050 NVENC" : "CE.SDK"}`}
           duration={exportClipDuration}
           downloadUrl={exportedVideoUrl}
         />

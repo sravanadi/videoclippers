@@ -12,6 +12,46 @@ type UseCesdkEngineOptions = {
   onAfterDispose?: () => void;
 };
 
+// Ensure WebGL contexts created by CE.SDK in browser or OffscreenCanvas request the discrete high-performance GPU (NVIDIA RTX 3050)
+if (typeof window !== "undefined" && !(window as any).__gpuPowerPreferencePatched) {
+  (window as any).__gpuPowerPreferencePatched = true;
+  try {
+    const origCanvasGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      this: HTMLCanvasElement,
+      ...args: any[]
+    ) {
+      const [contextType, contextAttributes] = args;
+      if (contextType === "webgl" || contextType === "webgl2") {
+        args[1] = {
+          powerPreference: "high-performance",
+          ...contextAttributes,
+        };
+      }
+      return (origCanvasGetContext as any).apply(this, args);
+    } as any;
+
+    if (typeof OffscreenCanvas !== "undefined") {
+      const origOffscreenGetContext = OffscreenCanvas.prototype.getContext;
+      OffscreenCanvas.prototype.getContext = function (
+        this: OffscreenCanvas,
+        ...args: any[]
+      ) {
+        const [contextType, contextAttributes] = args;
+        if (contextType === "webgl" || contextType === "webgl2") {
+          args[1] = {
+            powerPreference: "high-performance",
+            ...contextAttributes,
+          };
+        }
+        return (origOffscreenGetContext as any).apply(this, args);
+      } as any;
+    }
+  } catch (gpuPatchErr) {
+    console.warn("Could not patch WebGL high-performance preference:", gpuPatchErr);
+  }
+}
+
 export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
   const { onBeforeDispose, onAfterDispose } = options;
   const engineRef = useRef<CreativeEngineInstance | null>(null);
@@ -42,6 +82,19 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
             optimizedLocalUploads: true,
           },
         });
+
+        // Increase video export inactivity timeout to 10 minutes (600,000ms) to prevent timeout failures on long/4K clips
+        try {
+          if (typeof (engine as any).unstable_setVideoExportInactivityTimeout === "function") {
+            (engine as any).unstable_setVideoExportInactivityTimeout(600000);
+          }
+          if (typeof (engine as any).unstable_setExportInactivityTimeout === "function") {
+            (engine as any).unstable_setExportInactivityTimeout(600000);
+          }
+        } catch (timeoutErr) {
+          console.warn("Could not set export inactivity timeout", timeoutErr);
+        }
+
         try {
           await engine.addDefaultAssetSources({
             baseURL: DEFAULT_ASSET_LIBRARY_BASE_URL,
@@ -83,7 +136,7 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
         // Clean OPFS directory on initialization
         try {
           const directory = await navigator.storage.getDirectory();
-          const entries = directory.values();
+          const entries = (directory as any).values();
           for await (const entry of entries) {
             try {
               await directory.removeEntry(entry.name);
@@ -138,7 +191,7 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
     engineCanvasContainer.replaceChildren(engine.element);
     const page = pageRef.current;
     if (page && engine.block.isValid(page)) {
-      engine.scene.zoomToBlock(page, { padding: 0 }).catch((error) => {
+      engine.scene.zoomToBlock(page, { padding: 0 }).catch((error: unknown) => {
         console.warn("Failed to zoom after canvas attach", error);
       });
     }

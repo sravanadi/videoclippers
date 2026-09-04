@@ -114,41 +114,6 @@ const PreviewCanvas = ({
     >
       {videoFile && showControls && (
         <>
-          {/* Top Left Toolbar: Color Grade & Captions & 4K Quality */}
-          <div className="absolute left-3 top-3 z-10 flex items-center gap-2">
-            {activeColorGrade && onSelectColorGrade && colorGradeSettings && onUpdateColorGradeSettings && onToggleAutoGrade && (
-              <ColorGradePicker
-                activePresetId={activeColorGrade}
-                isAutoGrading={isAutoGrading ?? false}
-                currentSettings={colorGradeSettings}
-                onSelectPreset={onSelectColorGrade}
-                onToggleAutoGrade={onToggleAutoGrade}
-                onUpdateSettings={onUpdateColorGradeSettings}
-              />
-            )}
-            {activeCaptionStyle && onSelectCaptionStyle && (
-              <CaptionStylePicker
-                activePresetId={activeCaptionStyle}
-                onSelectPreset={onSelectCaptionStyle}
-              />
-            )}
-            {onToggleExportResolution && (
-              <button
-                type="button"
-                onClick={onToggleExportResolution}
-                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-mono font-semibold transition ${
-                  exportResolution === "4k"
-                    ? "border-amber-500/60 bg-amber-950/50 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.25)]"
-                    : "border-white/15 bg-black/60 text-slate-300 hover:text-white"
-                }`}
-                title="Toggle Export Resolution (4K Ultra HD vs 1080p HD)"
-              >
-                <Sparkles className="h-3 w-3 text-amber-400" />
-                {exportResolution === "4k" ? "4K UHD" : "1080p"}
-              </button>
-            )}
-          </div>
-
           {/* Top Right Toolbar: Export & Edit */}
           <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
             {onExport && (
@@ -242,7 +207,7 @@ const PreviewCanvas = ({
           role="button"
           tabIndex={videoFile || isUploadDisabled ? -1 : 0}
           aria-disabled={isUploadDisabled}
-          aria-hidden={videoFile}
+          aria-hidden={Boolean(videoFile)}
           onClick={onUploadClick}
           onKeyDown={onUploadKeyDown}
           onDragEnter={onDragEnter}

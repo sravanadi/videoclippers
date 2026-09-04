@@ -9,9 +9,12 @@ if os.path.exists(venv_site_packages) and venv_site_packages not in sys.path:
 
 import tempfile
 import logging
+import subprocess
+import shutil
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -187,6 +190,205 @@ async def transcribe_audio(
                 os.remove(tmp_path)
             except Exception:
                 pass
+
+def check_nvenc_available() -> bool:
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+def remove_temp_file(path: str):
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+@app.get("/export-gpu/status")
+async def export_gpu_status():
+    has_nvenc = check_nvenc_available()
+    return {
+        "status": "ok",
+        "nvenc_available": has_nvenc,
+        "device": model_device,
+        "recommended_encoder": "h264_nvenc" if has_nvenc else "libx264"
+    }
+
+@app.post("/export-gpu")
+async def export_video_gpu(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    start_time: float = Form(0.0),
+    end_time: Optional[float] = Form(None),
+    aspect_ratio: str = Form("9:16"),
+    resolution: str = Form("1080p"),
+    color_preset: str = Form("none"),
+    brightness: float = Form(0.0),
+    contrast: float = Form(1.0),
+    saturation: float = Form(1.0),
+    temperature: float = Form(0.0),
+    tint: float = Form(0.0),
+    subtitles_srt: Optional[str] = Form(None),
+    clip_title: Optional[str] = Form("clip")
+):
+    if not file:
+        raise HTTPException(status_code=400, detail="No video file provided.")
+
+    logger.info(f"Received GPU export request: {file.filename}, start={start_time}, end={end_time}, ratio={aspect_ratio}, res={resolution}, color={color_preset}")
+
+    # Save uploaded input video
+    in_suffix = os.path.splitext(file.filename)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=in_suffix) as in_tmp:
+        shutil.copyfileobj(file.file, in_tmp)
+        in_path = in_tmp.name
+
+    out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    out_path = out_tmp.name
+    out_tmp.close()
+
+    srt_path = None
+    if subtitles_srt and subtitles_srt.strip():
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".srt", mode="w", encoding="utf-8") as srt_tmp:
+            srt_tmp.write(subtitles_srt)
+            srt_path = srt_tmp.name
+
+    try:
+        # Determine target resolution
+        is_4k = resolution.lower() == "4k"
+        if aspect_ratio == "16:9":
+            w, h = (3840, 2160) if is_4k else (1920, 1080)
+            bitrate = "28M" if is_4k else "14M"
+        elif aspect_ratio == "1:1":
+            w, h = (2160, 2160) if is_4k else (1080, 1080)
+            bitrate = "22M" if is_4k else "12M"
+        elif aspect_ratio == "4:5":
+            w, h = (2160, 2700) if is_4k else (1080, 1350)
+            bitrate = "22M" if is_4k else "12M"
+        else: # 9:16 default
+            w, h = (2160, 3840) if is_4k else (1080, 1920)
+            bitrate = "28M" if is_4k else "14M"
+
+        # Build video filter graph
+        filters = []
+        # Aspect ratio framing: scale to fill and crop to exact dimensions
+        filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+
+        # Color grading
+        preset_clean = color_preset.lower().strip()
+        if preset_clean == "cinematic":
+            filters.append("eq=contrast=1.15:saturation=1.2:brightness=-0.02,colorchannelmixer=rr=1.05:bb=0.95")
+        elif preset_clean == "warm_sunset":
+            filters.append("eq=contrast=1.08:saturation=1.25:brightness=0.03,colorchannelmixer=rr=1.12:gg=1.02:bb=0.88")
+        elif preset_clean == "cyberpunk":
+            filters.append("eq=contrast=1.25:saturation=1.35:brightness=-0.04,colorchannelmixer=rr=0.92:gg=0.95:bb=1.2")
+        elif preset_clean == "moody_cool":
+            filters.append("eq=contrast=1.1:saturation=0.9:brightness=-0.02,colorchannelmixer=rr=0.9:gg=0.98:bb=1.12")
+        elif preset_clean == "vintage":
+            filters.append("eq=contrast=1.05:saturation=0.85:brightness=0.04,colorchannelmixer=rr=1.08:gg=1.0:bb=0.92")
+        elif preset_clean == "contrast":
+            filters.append("eq=contrast=1.3:saturation=1.15:brightness=-0.02")
+        elif preset_clean == "vibrant":
+            filters.append("eq=contrast=1.12:saturation=1.35:brightness=0.02")
+        elif contrast != 1.0 or brightness != 0.0 or saturation != 1.0:
+            c = max(0.5, min(2.0, contrast))
+            b = max(-0.5, min(0.5, brightness))
+            s = max(0.0, min(3.0, saturation))
+            filters.append(f"eq=contrast={c}:brightness={b}:saturation={s}")
+
+        # Subtitles filter if provided
+        if srt_path:
+            escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+            filters.append(f"subtitles='{escaped_srt}':force_style='FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,Alignment=2,MarginV=40'")
+
+        filter_graph = ",".join(filters)
+
+        # Build FFmpeg command
+        cmd = ["ffmpeg", "-y"]
+
+        # Timestamp cutting
+        if start_time > 0:
+            cmd.extend(["-ss", str(start_time)])
+        if end_time is not None and end_time > start_time:
+            duration = end_time - start_time
+            cmd.extend(["-t", str(duration)])
+
+        cmd.extend(["-i", in_path])
+        cmd.extend(["-vf", filter_graph])
+
+        has_nvenc = check_nvenc_available()
+        if has_nvenc:
+            logger.info("Using NVIDIA NVENC hardware encoder (h264_nvenc) on RTX 3050")
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-cq", "19",
+                "-b:v", bitrate,
+                "-profile:v", "high",
+                "-pix_fmt", "yuv420p"
+            ])
+        else:
+            logger.info("NVENC not available in container; using multi-core libx264 fast encoder")
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "19",
+                "-pix_fmt", "yuv420p"
+            ])
+
+        cmd.extend([
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            out_path
+        ])
+
+        logger.info(f"Running FFmpeg: {' '.join(cmd)}")
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        if result.returncode != 0:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            raise HTTPException(status_code=500, detail=f"FFmpeg export failed: {result.stderr[-400:]}")
+
+        logger.info(f"GPU export succeeded! Output size: {os.path.getsize(out_path)} bytes")
+
+        # Cleanup input and srt now
+        remove_temp_file(in_path)
+        if srt_path:
+            remove_temp_file(srt_path)
+
+        # Output cleanup on response completion
+        background_tasks.add_task(remove_temp_file, out_path)
+
+        clean_filename = f"{clip_title or 'exported_clip'}_{resolution}.mp4"
+        return FileResponse(
+            out_path,
+            media_type="video/mp4",
+            filename=clean_filename,
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_filename}"',
+                "X-Hardware-Encoder": "NVIDIA-RTX3050-NVENC" if has_nvenc else "CPU-libx264"
+            }
+        )
+
+    except HTTPException:
+        remove_temp_file(in_path)
+        if srt_path:
+            remove_temp_file(srt_path)
+        remove_temp_file(out_path)
+        raise
+    except Exception as e:
+        remove_temp_file(in_path)
+        if srt_path:
+            remove_temp_file(srt_path)
+        remove_temp_file(out_path)
+        logger.error(f"Failed GPU export: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
