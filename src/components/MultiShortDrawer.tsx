@@ -225,9 +225,9 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
                       🔥 {short.viralScore}% Viral
                     </span>
                   </div>
-                  <div className="flex items-center space-x-1.5 text-[11px] text-slate-400">
-                    <span className="bg-slate-800/90 px-1.5 py-0.5 rounded text-slate-300 font-mono text-[10px]">
-                      {short.durationSeconds}s
+                  <div className="flex items-center space-x-1.5 text-[11px]">
+                    <span className="bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded text-emerald-400 font-mono text-[10px] font-semibold" title="YouTube Ready Duration (1:00 - 2:59)">
+                      ⏱ {formatTime(short.durationSeconds)} (YT)
                     </span>
                     <span className="text-[10px] font-mono text-slate-400">
                       {formatTime(short.startTime)} - {formatTime(short.endTime)}
@@ -242,6 +242,13 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
                 <p className="text-[11px] text-slate-400 mt-0.5 italic line-clamp-2 leading-tight">
                   &quot;{short.hook}&quot;
                 </p>
+                {short.suggestedColorGrade && (
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <span className="text-[9px] uppercase font-mono tracking-wider text-indigo-300 bg-indigo-950/60 px-1.5 py-0.5 rounded border border-indigo-500/30">
+                      🎨 {short.suggestedColorGrade.replace(/_/g, " ")}
+                    </span>
+                  </div>
+                )}
 
                 {/* Footer Controls */}
                 <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between">

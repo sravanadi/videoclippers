@@ -1,4 +1,4 @@
-import { Download, Loader2, Pause, Pencil, Play, UploadCloud } from "lucide-react";
+import { Download, Loader2, Pause, Pencil, Play, Sparkles, UploadCloud } from "lucide-react";
 import type {
   ChangeEvent,
   DragEvent,
@@ -6,6 +6,13 @@ import type {
   Ref,
 } from "react";
 import { cn } from "@/lib/utils";
+import { ColorGradePicker } from "./color-grade-picker";
+import { CaptionStylePicker } from "./caption-style-picker";
+import type {
+  ColorGradePresetId,
+  ColorGradeSettings,
+} from "@/features/shortener/color-grading";
+import type { CaptionStylePresetId } from "@/features/shortener/caption-styles";
 
 type PreviewCanvasProps = {
   videoFile: File | null;
@@ -35,6 +42,16 @@ type PreviewCanvasProps = {
   isFaceCropPending?: boolean;
   engineCanvasContainerRef?: Ref<HTMLDivElement>;
   fileInputRef: Ref<HTMLInputElement>;
+  activeColorGrade?: ColorGradePresetId;
+  isAutoGrading?: boolean;
+  colorGradeSettings?: ColorGradeSettings;
+  onSelectColorGrade?: (id: ColorGradePresetId) => void;
+  onToggleAutoGrade?: () => void;
+  onUpdateColorGradeSettings?: (settings: ColorGradeSettings) => void;
+  activeCaptionStyle?: CaptionStylePresetId;
+  onSelectCaptionStyle?: (id: CaptionStylePresetId) => void;
+  exportResolution?: "1080p" | "4k";
+  onToggleExportResolution?: () => void;
 };
 
 const PreviewCanvas = ({
@@ -58,17 +75,26 @@ const PreviewCanvas = ({
   aspectRatio = 16 / 9,
   className,
   enableUpload = true,
-  showPlaybackControls = false,
+  showPlaybackControls = true,
   isPlaying = false,
   timelineDuration = 0,
   onTogglePlayback,
   isFaceCropPending = false,
   engineCanvasContainerRef,
   fileInputRef,
+  activeColorGrade,
+  isAutoGrading,
+  colorGradeSettings,
+  onSelectColorGrade,
+  onToggleAutoGrade,
+  onUpdateColorGradeSettings,
+  activeCaptionStyle,
+  onSelectCaptionStyle,
+  exportResolution = "1080p",
+  onToggleExportResolution,
 }: PreviewCanvasProps) => {
-  const shouldShowPlayback =
-    Boolean(videoFile) && showPlaybackControls && Boolean(onTogglePlayback);
-  const isPlaybackDisabled = !isEngineReady || !timelineDuration;
+  const isPlaybackDisabled = !isEngineReady || timelineDuration <= 0;
+  const shouldShowPlayback = showPlaybackControls && !isExporting;
   const shouldShowPreview = Boolean(videoFile) && !isExtracting;
   const formatTime = (value: number) => {
     if (!Number.isFinite(value) || value <= 0) return "0:00.00";
@@ -87,31 +113,69 @@ const PreviewCanvas = ({
       style={{ aspectRatio }}
     >
       {videoFile && showControls && (
-        <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
-          {onExport && (
+        <>
+          {/* Top Left Toolbar: Color Grade & Captions & 4K Quality */}
+          <div className="absolute left-3 top-3 z-10 flex items-center gap-2">
+            {activeColorGrade && onSelectColorGrade && colorGradeSettings && onUpdateColorGradeSettings && onToggleAutoGrade && (
+              <ColorGradePicker
+                activePresetId={activeColorGrade}
+                isAutoGrading={isAutoGrading ?? false}
+                currentSettings={colorGradeSettings}
+                onSelectPreset={onSelectColorGrade}
+                onToggleAutoGrade={onToggleAutoGrade}
+                onUpdateSettings={onUpdateColorGradeSettings}
+              />
+            )}
+            {activeCaptionStyle && onSelectCaptionStyle && (
+              <CaptionStylePicker
+                activePresetId={activeCaptionStyle}
+                onSelectPreset={onSelectCaptionStyle}
+              />
+            )}
+            {onToggleExportResolution && (
+              <button
+                type="button"
+                onClick={onToggleExportResolution}
+                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-mono font-semibold transition ${
+                  exportResolution === "4k"
+                    ? "border-amber-500/60 bg-amber-950/50 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.25)]"
+                    : "border-white/15 bg-black/60 text-slate-300 hover:text-white"
+                }`}
+                title="Toggle Export Resolution (4K Ultra HD vs 1080p HD)"
+              >
+                <Sparkles className="h-3 w-3 text-amber-400" />
+                {exportResolution === "4k" ? "4K UHD" : "1080p"}
+              </button>
+            )}
+          </div>
+
+          {/* Top Right Toolbar: Export & Edit */}
+          <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+            {onExport && (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-black/60 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-black/80 disabled:opacity-50 shadow-md"
+                onClick={onExport}
+                disabled={!isEngineReady || isExporting}
+              >
+                {isExporting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                ) : (
+                  <Download className="h-3.5 w-3.5 text-primary" />
+                )}
+                Export ({exportResolution === "4k" ? "4K" : "1080p"})
+              </button>
+            )}
             <button
               type="button"
-              className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-black/60 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-black/80 disabled:opacity-50"
-              onClick={onExport}
-              disabled={!isEngineReady || isExporting}
+              className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-black/60 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-black/80 disabled:opacity-50 shadow-md"
+              onClick={onOpenEditor}
+              disabled={!isEngineReady}
             >
-              {isExporting ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              Export
+              <Pencil className="h-3.5 w-3.5" /> Edit
             </button>
-          )}
-          <button
-            type="button"
-            className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-black/60 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-black/80 disabled:opacity-50"
-            onClick={onOpenEditor}
-            disabled={!isEngineReady}
-          >
-            <Pencil className="h-3.5 w-3.5" /> Edit
-          </button>
-        </div>
+          </div>
+        </>
       )}
       {videoFile && shouldShowPlayback && (
         <>

@@ -146,6 +146,7 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
                 viral_score: { type: "number" },
                 trimmed_text: { type: "string" },
                 estimated_duration_seconds: { type: "number" },
+                suggested_color_grade: { type: "string" },
                 notes: { type: "string" },
               },
               required: ["title", "hook", "trimmed_text"],
@@ -179,21 +180,54 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
     },
   };
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+  // Candidate endpoints for container and host environments
+  const candidateUrls = [
+    `${rootUrl}/api/chat`,
+    "http://host.docker.internal:11434/api/chat",
+    "http://127.0.0.1:11434/api/chat",
+    "http://localhost:11434/api/chat",
+  ].filter((u, i, arr) => arr.indexOf(u) === i);
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return {
-        ok: false,
-        status: response.status,
-        detail: `Local Ollama error (${response.status}): ${errText || "Request failed"}`,
-      };
+  let lastError = null;
+  let response = null;
+  let workingUrl = url;
+
+  for (const targetUrl of candidateUrls) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.info(`[Local Ollama] Attempt ${attempt} calling ${targetUrl}...`);
+        response = await fetch(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (response && response.ok) {
+          workingUrl = targetUrl;
+          break;
+        }
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Local Ollama] Connection attempt ${attempt} to ${targetUrl} failed: ${err.message || err}`);
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+    }
+    if (response && response.ok) break;
+  }
+
+  try {
+    if (!response || !response.ok) {
+      if (response) {
+        const errText = await response.text();
+        return {
+          ok: false,
+          status: response.status,
+          detail: `Local Ollama error (${response.status}): ${errText || "Request failed"}`,
+        };
+      }
+      throw lastError || new Error("Connection failed across all candidate endpoints");
     }
 
     const resJson = await response.json();
@@ -215,41 +249,58 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
         .filter((s) => s.length > 20);
 
       if (sentences.length > 0) {
+        // Build clips targeting ~180-250 words (approx 75-100 seconds)
+        const buildClipFromIndex = (startIdx, maxWords = 250) => {
+          let text = "";
+          let wordCount = 0;
+          let idx = startIdx;
+          while (idx < sentences.length && wordCount < maxWords) {
+            text += (text ? " " : "") + sentences[idx];
+            wordCount = text.split(/\s+/).length;
+            idx++;
+          }
+          const estSec = Math.min(170, Math.max(65, Math.round(wordCount / 2.5)));
+          return { text, estSec, nextIdx: idx };
+        };
+
         const total = sentences.length;
-        const short1 = sentences.slice(0, Math.min(5, total)).join(" ");
-        const midIdx = Math.floor(total / 2);
-        const short2 = sentences.slice(midIdx, Math.min(midIdx + 5, total)).join(" ");
-        const endIdx = Math.max(0, total - 5);
-        const short3 = sentences.slice(endIdx, total).join(" ");
+        const c1 = buildClipFromIndex(0);
+        const midStart = Math.min(c1.nextIdx, Math.floor(total / 3));
+        const c2 = buildClipFromIndex(midStart);
+        const endStart = Math.min(c2.nextIdx, Math.floor((2 * total) / 3));
+        const c3 = buildClipFromIndex(endStart);
 
         parsedData = {
           shorts: [
             {
               id: "short_1",
-              title: "Opening Highlight",
-              hook: sentences[0]?.slice(0, 60) || "Viral Opening",
+              title: "Opening Gameplay Highlight",
+              hook: sentences[0]?.slice(0, 60) || "Epic Opening Moment",
               viral_score: 95,
-              trimmed_text: short1,
-              estimated_duration_seconds: 30,
-              notes: "First key topic from video",
+              trimmed_text: c1.text,
+              estimated_duration_seconds: c1.estSec,
+              suggested_color_grade: "cinematic_hdr",
+              notes: "First key segment (1:00-2:59m range)",
             },
             {
               id: "short_2",
-              title: "Core Discussion",
-              hook: sentences[midIdx]?.slice(0, 60) || "Central Takeaway",
+              title: "Core Action Sequence",
+              hook: sentences[midStart]?.slice(0, 60) || "Intense Action & Commentary",
               viral_score: 92,
-              trimmed_text: short2,
-              estimated_duration_seconds: 35,
-              notes: "Main discussion point",
+              trimmed_text: c2.text,
+              estimated_duration_seconds: c2.estSec,
+              suggested_color_grade: "vibrant_gaming",
+              notes: "Mid-gameplay highlight (1:00-2:59m range)",
             },
             {
               id: "short_3",
-              title: "Climactic Moment",
-              hook: sentences[endIdx]?.slice(0, 60) || "Key Conclusion",
+              title: "Climactic Showcase",
+              hook: sentences[endStart]?.slice(0, 60) || "Spectacular Final Segment",
               viral_score: 89,
-              trimmed_text: short3,
-              estimated_duration_seconds: 30,
-              notes: "Key conclusion",
+              trimmed_text: c3.text,
+              estimated_duration_seconds: c3.estSec,
+              suggested_color_grade: "cyberpunk",
+              notes: "Ending highlight (1:00-2:59m range)",
             },
           ],
         };

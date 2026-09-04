@@ -58,6 +58,19 @@ import HighlightPicker from "@/components/shortener/highlight-picker";
 import ProcessingStatusCard from "@/components/shortener/processing-status-card";
 import PreviewCanvas from "@/components/shortener/preview-canvas";
 import { ExportProgressModal } from "@/components/shortener/export-progress-modal";
+import {
+  COLOR_GRADE_PRESETS,
+  applyColorGradeToEngineBlock,
+  analyzeFrameHistogram,
+  type ColorGradePresetId,
+  type ColorGradeSettings,
+} from "@/features/shortener/color-grading";
+import {
+  CAPTION_STYLE_PRESETS,
+  chunkWordsByCaptionStyle,
+  type CaptionStylePresetId,
+  type CaptionStylePreset,
+} from "@/features/shortener/caption-styles";
 import TemplatePicker from "@/components/shortener/template-picker";
 import TimelineScrubber from "@/components/shortener/timeline-scrubber";
 import TrimFocusCard from "@/components/shortener/trim-focus-card";
@@ -249,6 +262,16 @@ export default function App() {
   const [exportClipTitle, setExportClipTitle] = useState<string>("Short Video Clip");
   const [exportClipDuration, setExportClipDuration] = useState<number>(30);
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
+  const [activeColorGrade, setActiveColorGrade] =
+    useState<ColorGradePresetId>("auto_4k_cinematic");
+  const [isAutoColorGradeEnabled, setIsAutoColorGradeEnabled] =
+    useState<boolean>(true);
+  const [colorGradeSettings, setColorGradeSettings] =
+    useState<ColorGradeSettings>(COLOR_GRADE_PRESETS.auto_4k_cinematic.settings);
+  const [activeCaptionStyle, setActiveCaptionStyle] =
+    useState<CaptionStylePresetId>("karaoke_highlight");
+  const [exportResolution, setExportResolution] =
+    useState<"1080p" | "4k">("1080p");
   const [multiShorts, setMultiShorts] = useState<ShortClipCandidate[]>([]);
   const [activeShortClipId, setActiveShortClipId] = useState<string | null>(null);
   const [isMultiShortDrawerOpen, setIsMultiShortDrawerOpen] = useState(false);
@@ -258,6 +281,7 @@ export default function App() {
     null
   );
   const captionsTrackRef = useRef<number | null>(null);
+  const lastRefinedWordsRef = useRef<TranscriptWord[]>([]);
   const textHookBlockRef = useRef<number | null>(null);
   const textHookTextRef = useRef<string | null>(null);
   const textHookDurationRef = useRef<number>(HOOK_DURATION_SECONDS);
@@ -5920,11 +5944,13 @@ export default function App() {
       retime?: boolean;
       rangeMappings?: RangeMapping[];
       sourceWords?: TranscriptWord[];
+      styleOverride?: CaptionStylePresetId;
     }
   ) => {
     const engine = engineRef.current;
     if (!engine) return;
-    if (!words.length) {
+    const effectiveStyle = options?.styleOverride ?? activeCaptionStyle;
+    if (!words.length || effectiveStyle === "none") {
       clearCaptionsTrack(engine);
       return;
     }
@@ -5941,13 +5967,21 @@ export default function App() {
     const baseWords = shouldRetime
       ? retimeWordsSequentially(mappedWords)
       : mappedWords;
-    const segments = chunkWordsIntoCaptionSegments(baseWords);
+
+    lastRefinedWordsRef.current = baseWords;
+    const segments = chunkWordsByCaptionStyle(baseWords, effectiveStyle);
     clearCaptionsTrack(engine);
     if (!segments.length) return;
+
+    const preset = CAPTION_STYLE_PRESETS[effectiveStyle];
+    captionStyleAppliedRef.current = false;
+    captionPresetAppliedRef.current = false;
+
     const firstCaption = engine.block.create(CAPTION_ENTRY_TYPE);
     engine.block.appendChild(trackId, firstCaption);
     await applyCaptionPreset(firstCaption);
-    styleCaptionEntry(firstCaption);
+    styleCaptionEntry(firstCaption, preset);
+
     segments.forEach((segment, index) => {
       const captionEntry =
         index === 0 ? firstCaption : engine.block.duplicate(firstCaption, false);
@@ -5958,18 +5992,17 @@ export default function App() {
         engine.block.appendChild(trackId, captionEntry);
       }
     });
-    applyCaptionVisibility(captionsEnabled, engine);
+    applyCaptionVisibility(captionsEnabled && effectiveStyle !== "none", engine);
   };
 
-  const styleCaptionEntry = (captionId: number) => {
+  const styleCaptionEntry = (captionId: number, stylePreset?: CaptionStylePreset) => {
     const engine = engineRef.current;
-    if (
-      !engine ||
-      !engine.block.isValid(captionId) ||
-      captionStyleAppliedRef.current
-    ) {
-      return;
-    }
+    if (!engine || !engine.block.isValid(captionId)) return;
+    const preset =
+      stylePreset ??
+      CAPTION_STYLE_PRESETS[activeCaptionStyle] ??
+      CAPTION_STYLE_PRESETS.karaoke_highlight;
+
     const apply = (setter: () => void, label: string) => {
       try {
         setter();
@@ -5977,21 +6010,59 @@ export default function App() {
         console.warn(`Failed to set caption ${label}`, error);
       }
     };
-    apply(() => engine.block.setPositionX(captionId, 0.10), "posX");
+
+    apply(() => engine.block.setPositionX(captionId, 0.08), "posX");
     apply(() => engine.block.setPositionXMode(captionId, "Percent"), "posX mode");
-    apply(() => engine.block.setPositionY(captionId, 0.70), "posY");
+    apply(() => engine.block.setPositionY(captionId, preset.posY), "posY");
     apply(() => engine.block.setPositionYMode(captionId, "Percent"), "posY mode");
-    apply(() => engine.block.setWidth(captionId, 0.8), "width");
+    apply(() => engine.block.setWidth(captionId, 0.84), "width");
     apply(() => engine.block.setWidthMode(captionId, "Percent"), "width mode");
-    apply(() => engine.block.setHeight(captionId, 0.25), "height");
+    apply(() => engine.block.setHeight(captionId, 0.24), "height");
     apply(() => engine.block.setHeightMode(captionId, "Percent"), "height mode");
     apply(
       () => engine.block.setBool(captionId, "caption/automaticFontSizeEnabled", true),
       "auto font size"
     );
-    apply(() => engine.block.setDouble(captionId, "caption/maxAutomaticFontSize", 100), "min font size");
-    apply(() => engine.block.setDouble(captionId, "caption/minAutomaticFontSize", 1), "max font size");
-    captionStyleAppliedRef.current = true;
+    apply(() => engine.block.setDouble(captionId, "caption/maxAutomaticFontSize", preset.fontSizeMax), "max font size");
+    apply(() => engine.block.setDouble(captionId, "caption/minAutomaticFontSize", preset.fontSizeMin), "min font size");
+
+    try {
+      engine.block.setColorRGBA(
+        captionId,
+        "fill/color",
+        preset.textColor.r,
+        preset.textColor.g,
+        preset.textColor.b,
+        preset.textColor.a
+      );
+    } catch {}
+
+    if (preset.strokeColor && preset.strokeWidth) {
+      try {
+        engine.block.setColorRGBA(
+          captionId,
+          "stroke/color",
+          preset.strokeColor.r,
+          preset.strokeColor.g,
+          preset.strokeColor.b,
+          preset.strokeColor.a
+        );
+        engine.block.setFloat(captionId, "stroke/width", preset.strokeWidth);
+      } catch {}
+    }
+
+    if (preset.backgroundColor) {
+      try {
+        engine.block.setColorRGBA(
+          captionId,
+          "backgroundColor",
+          preset.backgroundColor.r,
+          preset.backgroundColor.g,
+          preset.backgroundColor.b,
+          preset.backgroundColor.a
+        );
+      } catch {}
+    }
   };
 
   const applyCaptionPreset = async (captionId: number) => {
@@ -6014,6 +6085,96 @@ export default function App() {
       console.warn("Failed to apply caption preset", error);
     }
   };
+
+  const applyCurrentColorGrade = useCallback(
+    (settingsOverride?: ColorGradeSettings, engineOverride?: CreativeEngineInstance | null) => {
+      const engine = engineOverride ?? engineRef.current;
+      if (!engine) return;
+      const settings = settingsOverride ?? colorGradeSettings;
+
+      const blocksToGrade: number[] = [];
+      if (videoBlockRef.current && engine.block.isValid(videoBlockRef.current)) {
+        blocksToGrade.push(videoBlockRef.current);
+      }
+      if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
+        const children = engine.block.getChildren(videoTrackRef.current) ?? [];
+        children.forEach((c) => {
+          if (engine.block.isValid(c)) blocksToGrade.push(c);
+        });
+      }
+
+      const uniqueBlocks = [...new Set(blocksToGrade)];
+      uniqueBlocks.forEach((blockId) => {
+        applyColorGradeToEngineBlock(engine, blockId, settings);
+      });
+    },
+    [colorGradeSettings]
+  );
+
+  const handleToggleAutoGrade = useCallback(() => {
+    if (!isAutoColorGradeEnabled) {
+      setIsAutoColorGradeEnabled(true);
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 160;
+        canvas.height = 90;
+        const ctx = canvas.getContext("2d");
+        const videoEl = document.querySelector("video");
+        if (ctx && videoEl && videoEl.readyState >= 2) {
+          ctx.drawImage(videoEl, 0, 0, 160, 90);
+          const analyzedSettings = analyzeFrameHistogram(ctx, 160, 90);
+          setColorGradeSettings(analyzedSettings);
+          setActiveColorGrade("auto_4k_cinematic");
+          applyCurrentColorGrade(analyzedSettings);
+          return;
+        }
+      } catch (err) {
+        console.warn("Histogram sampling fallback", err);
+      }
+      const preset = COLOR_GRADE_PRESETS.auto_4k_cinematic.settings;
+      setColorGradeSettings(preset);
+      setActiveColorGrade("auto_4k_cinematic");
+      applyCurrentColorGrade(preset);
+    } else {
+      setIsAutoColorGradeEnabled(false);
+      setActiveColorGrade("none");
+      const noneSettings = COLOR_GRADE_PRESETS.none.settings;
+      setColorGradeSettings(noneSettings);
+      applyCurrentColorGrade(noneSettings);
+    }
+  }, [isAutoColorGradeEnabled, applyCurrentColorGrade]);
+
+  const handleSelectColorGrade = useCallback(
+    (presetId: ColorGradePresetId) => {
+      setActiveColorGrade(presetId);
+      setIsAutoColorGradeEnabled(false);
+      const settings = COLOR_GRADE_PRESETS[presetId].settings;
+      setColorGradeSettings(settings);
+      applyCurrentColorGrade(settings);
+    },
+    [applyCurrentColorGrade]
+  );
+
+  const handleUpdateColorGradeSettings = useCallback(
+    (newSettings: ColorGradeSettings) => {
+      setColorGradeSettings(newSettings);
+      applyCurrentColorGrade(newSettings);
+    },
+    [applyCurrentColorGrade]
+  );
+
+  const handleSelectCaptionStyle = useCallback(
+    async (styleId: CaptionStylePresetId) => {
+      setActiveCaptionStyle(styleId);
+      if (lastRefinedWordsRef.current.length > 0) {
+        await applyCaptionsForWords(lastRefinedWordsRef.current, {
+          styleOverride: styleId,
+          sourceWords: currentTranscriptWords,
+        });
+      }
+    },
+    [currentTranscriptWords]
+  );
 
   const applyTranscriptCuts = async (
     sourceWords: TranscriptWord[],
@@ -6282,6 +6443,9 @@ export default function App() {
       }
     }
 
+    // Apply active color grading to all newly created video clips
+    applyCurrentColorGrade(undefined, engine);
+
     if (pageRef.current && engine.block.isValid(pageRef.current)) {
       try {
         void engine.scene.zoomToBlock(pageRef.current, { padding: 0 });
@@ -6354,10 +6518,21 @@ export default function App() {
     }, 250);
 
     try {
+      const is4K = exportResolution === "4k";
+      const is916 = targetAspectRatioId === "9:16";
+      const targetWidth = is4K ? (is916 ? 2160 : 3840) : (is916 ? 1080 : 1920);
+      const targetHeight = is4K ? (is916 ? 3840 : 2160) : (is916 ? 1920 : 1080);
+      const videoBitrate = is4K ? 35000000 : 18000000;
+
       const blob = await (engine.block as any).exportVideo(
         pageId,
         {
           mimeType: "video/mp4",
+          targetWidth,
+          targetHeight,
+          videoBitrate,
+          h264Profile: 100,
+          h264Level: is4K ? 52 : 51,
         },
         (renderedFrames: number, encodedFrames: number, totalFrames: number) => {
           if (totalFrames > 0) {
@@ -6413,6 +6588,15 @@ export default function App() {
         setTargetAspectRatioId("9:16");
         setAutoProcessing(false);
         setAutoProcessingError(null);
+
+        if (firstShort.suggestedColorGrade && firstShort.suggestedColorGrade in COLOR_GRADE_PRESETS) {
+          const presetId = firstShort.suggestedColorGrade as ColorGradePresetId;
+          setActiveColorGrade(presetId);
+          setIsAutoColorGradeEnabled(presetId !== "none");
+          const settings = COLOR_GRADE_PRESETS[presetId].settings;
+          setColorGradeSettings(settings);
+        }
+
         await applyTranscriptCuts(
           words,
           firstShort.words,
@@ -6436,6 +6620,15 @@ export default function App() {
     setActiveShortClipId(short.id);
     setTargetAspectRatioId("9:16");
     setIsFaceCropPending(false);
+
+    if (short.suggestedColorGrade && short.suggestedColorGrade in COLOR_GRADE_PRESETS) {
+      const presetId = short.suggestedColorGrade as ColorGradePresetId;
+      setActiveColorGrade(presetId);
+      setIsAutoColorGradeEnabled(presetId !== "none");
+      const settings = COLOR_GRADE_PRESETS[presetId].settings;
+      setColorGradeSettings(settings);
+    }
+
     await applyTranscriptCuts(
       words,
       short.words,
@@ -6798,6 +6991,17 @@ export default function App() {
     onTogglePlayback: togglePlayback,
     fileInputRef,
     isFaceCropPending: showResultStage && isFaceCropPending,
+    activeColorGrade,
+    isAutoGrading: isAutoColorGradeEnabled,
+    colorGradeSettings,
+    onSelectColorGrade: handleSelectColorGrade,
+    onToggleAutoGrade: handleToggleAutoGrade,
+    onUpdateColorGradeSettings: handleUpdateColorGradeSettings,
+    activeCaptionStyle,
+    onSelectCaptionStyle: handleSelectCaptionStyle,
+    exportResolution,
+    onToggleExportResolution: () =>
+      setExportResolution((prev) => (prev === "4k" ? "1080p" : "4k")),
   };
 
   const panelMotionClass = `relative w-full transition-all duration-500 ease-out ${
@@ -7295,7 +7499,7 @@ export default function App() {
           isComplete={isExportComplete}
           error={exportError}
           clipTitle={exportClipTitle}
-          aspectRatio={targetAspectRatioId}
+          aspectRatio={`${targetAspectRatioId} • ${exportResolution.toUpperCase()}`}
           duration={exportClipDuration}
           downloadUrl={exportedVideoUrl}
         />

@@ -7,6 +7,7 @@ export interface RawShortCandidate {
   viral_score?: number;
   trimmed_text: string;
   estimated_duration_seconds?: number;
+  suggested_color_grade?: string;
   notes?: string;
 }
 
@@ -19,6 +20,7 @@ export interface ShortClipCandidate {
   endTime: number;
   words: TranscriptWord[];
   durationSeconds: number;
+  suggestedColorGrade?: string;
   notes?: string;
 }
 

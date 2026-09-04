@@ -214,10 +214,45 @@ export const requestMultiShortFleet = async (
       words
     );
 
-    const clipWords = normalized.trimmed_words || [];
-    const startTime = clipWords.length > 0 ? clipWords[0].start : 0;
-    const endTime = clipWords.length > 0 ? clipWords[clipWords.length - 1].end : 0;
-    const durationSeconds = Math.max(1, Math.round(endTime - startTime));
+    let clipWords = normalized.trimmed_words || [];
+    if (clipWords.length === 0) return;
+
+    let startIdx = words.findIndex((w) => w.start >= clipWords[0].start);
+    if (startIdx === -1) startIdx = 0;
+    let endIdx = words.findIndex((w) => w.end >= clipWords[clipWords.length - 1].end);
+    if (endIdx === -1) endIdx = words.length - 1;
+
+    let startWord = words[startIdx];
+    let endWord = words[endIdx];
+    let currentDuration = endWord.end - startWord.start;
+
+    // Minimum duration guard: strictly ensure duration >= 60 seconds (1:00) if source video permits
+    const maxAvailableDuration = words[words.length - 1].end - words[0].start;
+    const targetMinDuration = Math.min(60, maxAvailableDuration);
+
+    while (currentDuration < targetMinDuration && (startIdx > 0 || endIdx < words.length - 1)) {
+      if (endIdx < words.length - 1) {
+        endIdx++;
+      } else if (startIdx > 0) {
+        startIdx--;
+      }
+      startWord = words[startIdx];
+      endWord = words[endIdx];
+      currentDuration = endWord.end - startWord.start;
+    }
+
+    // Maximum duration guard: strictly cap duration <= 179 seconds (2:59)
+    const MAX_DURATION_SECONDS = 179;
+    while (currentDuration > MAX_DURATION_SECONDS && endIdx > startIdx) {
+      endIdx--;
+      endWord = words[endIdx];
+      currentDuration = endWord.end - startWord.start;
+    }
+
+    clipWords = words.slice(startIdx, endIdx + 1);
+    const startTime = clipWords[0].start;
+    const endTime = clipWords[clipWords.length - 1].end;
+    const durationSeconds = Math.round(endTime - startTime);
 
     processedShorts.push({
       id: item.id || `short_${idx + 1}`,
@@ -228,6 +263,7 @@ export const requestMultiShortFleet = async (
       endTime,
       words: clipWords,
       durationSeconds,
+      suggestedColorGrade: item.suggested_color_grade || "cinematic_hdr",
       notes: item.notes,
     });
   });
