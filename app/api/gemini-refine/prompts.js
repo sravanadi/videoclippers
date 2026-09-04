@@ -55,14 +55,17 @@ export const MULTI_SHORT_RESPONSE_SCHEMA = `Return STRICT JSON matching this sch
     "title": string (3-6 words describing the standalone topic),
     "hook": string (6-12 words punchy social media hook for YouTube/Reels/TikTok),
     "viral_score": number (estimated engagement rating between 75 and 99),
-    "trimmed_text": string (the edited standalone transcript using only words from TRANSCRIPT_TEXT for this specific clip section; approx 150 to 420 words),
-    "estimated_duration_seconds": number (target runtime strictly between 60 and 179 seconds — exactly 1:00 to 2:59 minutes for YouTube),
+    "trimmed_text": string (the edited standalone transcript using only words from TRANSCRIPT_TEXT for this specific clip section; approx 160 to 420 words),
+    "estimated_duration_seconds": number (target runtime strictly between 61 and 179 seconds — greater than 1 minute up to 2:59 minutes for YouTube),
     "suggested_color_grade": string (one of: "cinematic_hdr", "vibrant_gaming", "cyberpunk", "warm_film", "natural"),
     "notes": string optional
   }]
 }
 
-Extract 3 to 6 distinct, self-contained video clip candidates from different parts of TRANSCRIPT_TEXT. Every clip MUST have an authentic runtime strictly between 60 seconds and 179 seconds (1:00 to 2:59 minutes; approx 150 to 420 words) for YouTube videos. Never extract clips shorter than 60s or longer than 179s. Each clip must have an independent, complete narrative arc that makes sense on its own.
+CRITICAL RULES:
+1. NO OVERLAPPING CLIPS: Every clip MUST be extracted from a completely separate, distinct, non-overlapping part of the video. Do NOT reuse sentences or moments from one clip in another clip. Clip 1, Clip 2, Clip 3 must cover different sequential timestamps.
+2. DURATION STRICTLY GREATER THAN 1 MINUTE: Every clip MUST be strictly greater than 60 seconds (minimum 61s, maximum 179s; approx 160-420 words) for YouTube uploads. Less than 60 seconds is not accepted.
+3. STANDALONE NARRATIVE: Each clip must make complete sense on its own with clear opening and conclusion.
 Do not include explanations outside the JSON.`;
 
 export const SHORTENING_MODE_INSTRUCTIONS = {
@@ -77,5 +80,5 @@ export const SHORTENING_MODE_INSTRUCTIONS = {
   blooper:
     "Create a blooper/comedy reel by identifying and keeping the funniest, most awkward, or entertaining moments from the video. Focus on: bloopers and mistakes, funny conversations and banter, awkward moments and reactions, unexpected jokes or comedic timing, amusing tangents or derailments, and any genuinely humorous content. KEEP the natural imperfections, stammers, and verbal stumbles that make these moments funny - do NOT clean up disfluencies if they add to the comedic effect. Remove only the boring or serious segments between funny moments. The final runtime should prioritize humor and entertainment value over coherence. Target a punchy, energetic vibe that maximizes laughs.",
   multi_short:
-    "Analyze the full transcript and extract 3 to 6 high-value, standalone video clips suitable for YouTube. Each clip MUST cover a distinct topic or gameplay highlight, be strictly between 60 and 179 seconds long (1:00 to 2:59 minutes; approx. 150 to 420 words), begin with clear context, and be completely self-contained.",
+    "Analyze the full transcript and extract 3 to 6 high-value, completely distinct, NON-OVERLAPPING video clips suitable for YouTube. Every clip must cover a different section of the video without reusing the same footage or sentences. Each clip must be strictly greater than 1 minute (between 61 and 179 seconds long; approx. 160 to 420 words), begin with clear context, and be completely self-contained.",
 };

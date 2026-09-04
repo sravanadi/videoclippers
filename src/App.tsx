@@ -5980,7 +5980,7 @@ export default function App() {
     const firstCaption = engine.block.create(CAPTION_ENTRY_TYPE);
     engine.block.appendChild(trackId, firstCaption);
     await applyCaptionPreset(firstCaption);
-    styleCaptionEntry(firstCaption, preset);
+    styleCaptionEntry(firstCaption, preset, targetAspectRatioId);
 
     segments.forEach((segment, index) => {
       const captionEntry =
@@ -5995,13 +5995,42 @@ export default function App() {
     applyCaptionVisibility(captionsEnabled && effectiveStyle !== "none", engine);
   };
 
-  const styleCaptionEntry = (captionId: number, stylePreset?: CaptionStylePreset) => {
+  const styleCaptionEntry = (
+    captionId: number,
+    stylePreset?: CaptionStylePreset,
+    aspectRatioId?: string
+  ) => {
     const engine = engineRef.current;
     if (!engine || !engine.block.isValid(captionId)) return;
     const preset =
       stylePreset ??
       CAPTION_STYLE_PRESETS[activeCaptionStyle] ??
       CAPTION_STYLE_PRESETS.karaoke_highlight;
+
+    const currentRatio = aspectRatioId ?? targetAspectRatioId ?? "9:16";
+    const isVertical = currentRatio === "9:16";
+    const isLandscape = currentRatio === "16:9";
+    const isSquare = currentRatio === "1:1";
+    const isPortraitFeed = currentRatio === "4:5";
+
+    // Proportional dimensions based on screen ratio so captions never look giant or cover the video
+    // 9:16 vertical: 82% width, 12% height, centered horizontally, safe lower third
+    // 16:9 landscape: 70% width, 10% height
+    // 1:1 / 4:5: 76-78% width, 12% height
+    const boxWidth = isLandscape ? 0.70 : isSquare ? 0.76 : isPortraitFeed ? 0.78 : 0.82;
+    const boxHeight = isLandscape ? 0.10 : isVertical ? 0.12 : 0.12;
+    const posX = (1 - boxWidth) / 2;
+    const posY = isLandscape ? 0.82 : (preset.posY ?? 0.73);
+
+    // Font size scaling based on size ratio:
+    // Vertical video (9:16) has narrower screen width, so giant fonts (100pt+) look monstrous.
+    // Proportional scaling:
+    // 9:16 (vertical): max ~44-48 pt, min 16 pt
+    // 16:9 (horizontal): max ~34-36 pt, min 12-14 pt
+    // 1:1 / 4:5: max ~38-42 pt, min 14 pt
+    const fontRatioMultiplier = isLandscape ? 0.75 : isSquare ? 0.85 : isPortraitFeed ? 0.90 : 1.0;
+    const computedMaxFontSize = Math.max(22, Math.round(preset.fontSizeMax * fontRatioMultiplier));
+    const computedMinFontSize = Math.max(10, Math.round(preset.fontSizeMin * fontRatioMultiplier));
 
     const apply = (setter: () => void, label: string) => {
       try {
@@ -6011,20 +6040,20 @@ export default function App() {
       }
     };
 
-    apply(() => engine.block.setPositionX(captionId, 0.08), "posX");
+    apply(() => engine.block.setPositionX(captionId, posX), "posX");
     apply(() => engine.block.setPositionXMode(captionId, "Percent"), "posX mode");
-    apply(() => engine.block.setPositionY(captionId, preset.posY), "posY");
+    apply(() => engine.block.setPositionY(captionId, posY), "posY");
     apply(() => engine.block.setPositionYMode(captionId, "Percent"), "posY mode");
-    apply(() => engine.block.setWidth(captionId, 0.84), "width");
+    apply(() => engine.block.setWidth(captionId, boxWidth), "width");
     apply(() => engine.block.setWidthMode(captionId, "Percent"), "width mode");
-    apply(() => engine.block.setHeight(captionId, 0.24), "height");
+    apply(() => engine.block.setHeight(captionId, boxHeight), "height");
     apply(() => engine.block.setHeightMode(captionId, "Percent"), "height mode");
     apply(
       () => engine.block.setBool(captionId, "caption/automaticFontSizeEnabled", true),
       "auto font size"
     );
-    apply(() => engine.block.setDouble(captionId, "caption/maxAutomaticFontSize", preset.fontSizeMax), "max font size");
-    apply(() => engine.block.setDouble(captionId, "caption/minAutomaticFontSize", preset.fontSizeMin), "min font size");
+    apply(() => engine.block.setDouble(captionId, "caption/maxAutomaticFontSize", computedMaxFontSize), "max font size");
+    apply(() => engine.block.setDouble(captionId, "caption/minAutomaticFontSize", computedMinFontSize), "min font size");
 
     try {
       engine.block.setColorRGBA(
@@ -6876,6 +6905,16 @@ export default function App() {
           speakerAssignmentsRef.current,
           speakerFallbackFaces
         );
+      }
+
+      // Dynamically re-scale all active captions to fit the new aspect ratio perfectly
+      if (engine && captionsTrackRef.current && engine.block.isValid(captionsTrackRef.current)) {
+        const captionChildren = engine.block.getChildren(captionsTrackRef.current) ?? [];
+        captionChildren.forEach((childId) => {
+          if (engine.block.isValid(childId)) {
+            styleCaptionEntry(childId, undefined, ratioId);
+          }
+        });
       }
     }
   };

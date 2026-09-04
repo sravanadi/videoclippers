@@ -118,7 +118,11 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
   const modelToUse = requestedModel && !requestedModel.includes("/") ? requestedModel : defaultModel;
   const url = `${rootUrl}/api/chat`;
 
-  const systemPrompt = `${instructions}\n\nCRITICAL: Return valid JSON ONLY matching the requested schema. No conversational filler.`;
+  const isMultiShort = instructions.includes("MULTI_SHORT_RESPONSE_SCHEMA") || instructions.includes('"shorts"');
+
+  const systemPrompt = isMultiShort
+    ? `${instructions}\n\nCRITICAL REQUIREMENT: Every clip in "shorts" MUST be from a completely separate, non-overlapping section of the transcript. Do NOT reuse or repeat the same sentences across multiple clips. Every clip duration MUST be strictly greater than 60 seconds (between 61s and 179s / approx 160-420 words). Return valid JSON ONLY matching the schema.`
+    : `${instructions}\n\nCRITICAL: Return valid JSON ONLY matching the requested schema. No conversational filler.`;
   const userPrompt = `TRANSCRIPT_TEXT:\n${transcriptText}`;
 
   // Estimate required context tokens: ~3.2 chars per token, add buffer for thinking & output
@@ -128,8 +132,6 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
   console.info(
     `[Local Ollama] Calling ${url} with model '${modelToUse}' (dynamic num_ctx: ${numCtx}, est input tokens: ${estInputTokens})...`
   );
-
-  const isMultiShort = instructions.includes("MULTI_SHORT_RESPONSE_SCHEMA") || instructions.includes('"shorts"');
 
   const gbnfSchema = isMultiShort
     ? {
@@ -173,10 +175,10 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
       { role: "user", content: userPrompt },
     ],
     stream: false,
-    format: gbnfSchema,
+    format: "json",
     options: {
-      num_ctx: numCtx,
-      temperature: 0.1,
+      num_ctx: Math.min(numCtx, 8192),
+      temperature: 0.2,
     },
   };
 
@@ -265,9 +267,9 @@ async function callLocalOllama({ instructions, transcriptText, requestedModel })
 
         const total = sentences.length;
         const c1 = buildClipFromIndex(0);
-        const midStart = Math.min(c1.nextIdx, Math.floor(total / 3));
+        const midStart = Math.max(c1.nextIdx, Math.floor(total / 3));
         const c2 = buildClipFromIndex(midStart);
-        const endStart = Math.min(c2.nextIdx, Math.floor((2 * total) / 3));
+        const endStart = Math.max(c2.nextIdx, Math.floor((2 * total) / 3));
         const c3 = buildClipFromIndex(endStart);
 
         parsedData = {

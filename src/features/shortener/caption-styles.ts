@@ -44,10 +44,10 @@ export const CAPTION_STYLE_PRESETS: Record<CaptionStylePresetId, CaptionStylePre
     textColor: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, // White
     highlightColor: { r: 1.0, g: 0.9, b: 0.0, a: 1.0 }, // Neon Yellow
     strokeColor: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-    strokeWidth: 4,
-    fontSizeMax: 110,
-    fontSizeMin: 28,
-    posY: 0.68,
+    strokeWidth: 3,
+    fontSizeMax: 48,
+    fontSizeMin: 18,
+    posY: 0.73,
   },
   tiktok_bold: {
     id: "tiktok_bold",
@@ -59,10 +59,10 @@ export const CAPTION_STYLE_PRESETS: Record<CaptionStylePresetId, CaptionStylePre
     textColor: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
     highlightColor: { r: 0.2, g: 0.9, b: 0.4, a: 1.0 }, // Emerald Green
     strokeColor: { r: 0.05, g: 0.05, b: 0.08, a: 1.0 },
-    strokeWidth: 5,
-    fontSizeMax: 100,
-    fontSizeMin: 24,
-    posY: 0.65,
+    strokeWidth: 4,
+    fontSizeMax: 44,
+    fontSizeMin: 16,
+    posY: 0.70,
   },
   clean_minimal: {
     id: "clean_minimal",
@@ -74,9 +74,9 @@ export const CAPTION_STYLE_PRESETS: Record<CaptionStylePresetId, CaptionStylePre
     textColor: { r: 0.95, g: 0.95, b: 0.98, a: 1.0 },
     highlightColor: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
     backgroundColor: { r: 0.0, g: 0.0, b: 0.0, a: 0.65 },
-    fontSizeMax: 60,
-    fontSizeMin: 18,
-    posY: 0.82,
+    fontSizeMax: 34,
+    fontSizeMin: 14,
+    posY: 0.80,
   },
   cyberpunk_gaming: {
     id: "cyberpunk_gaming",
@@ -88,10 +88,10 @@ export const CAPTION_STYLE_PRESETS: Record<CaptionStylePresetId, CaptionStylePre
     textColor: { r: 0.1, g: 0.95, b: 0.95, a: 1.0 }, // Neon Cyan
     highlightColor: { r: 1.0, g: 0.85, b: 0.1, a: 1.0 }, // Gold Yellow
     strokeColor: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-    strokeWidth: 4,
-    fontSizeMax: 105,
-    fontSizeMin: 26,
-    posY: 0.70,
+    strokeWidth: 3,
+    fontSizeMax: 46,
+    fontSizeMin: 16,
+    posY: 0.72,
   },
   none: {
     id: "none",

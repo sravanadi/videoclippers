@@ -202,6 +202,12 @@ export const requestMultiShortFleet = async (
   }
   const processedShorts: import("./multiShortTypes").ShortClipCandidate[] = [];
 
+  // Track claimed ranges to guarantee ZERO OVERLAP across multiple clips
+  const claimedRanges: { startIdx: number; endIdx: number; startTime: number; endTime: number }[] = [];
+  const totalSourceDuration = words[words.length - 1].end - words[0].start;
+  const targetMinDuration = Math.min(61, Math.max(20, totalSourceDuration)); // Strictly > 60s if source permits
+  const MAX_DURATION_SECONDS = 179; // 2:59 minutes max
+
   rawShorts.forEach((item, idx) => {
     if (!item?.trimmed_text) return;
     const normalized = normalizeGeminiRefinement(
@@ -217,47 +223,71 @@ export const requestMultiShortFleet = async (
     let clipWords = normalized.trimmed_words || [];
     if (clipWords.length === 0) return;
 
-    let startIdx = words.findIndex((w) => w.start >= clipWords[0].start);
-    if (startIdx === -1) startIdx = 0;
-    let endIdx = words.findIndex((w) => w.end >= clipWords[clipWords.length - 1].end);
-    if (endIdx === -1) endIdx = words.length - 1;
+    let rawStartIdx = words.findIndex((w) => w.start >= clipWords[0].start);
+    if (rawStartIdx === -1) rawStartIdx = 0;
+    let rawEndIdx = words.findIndex((w) => w.end >= clipWords[clipWords.length - 1].end);
+    if (rawEndIdx === -1) rawEndIdx = words.length - 1;
 
+    // Shift startIdx if it falls into any already claimed range so there is NO duplicate footage
+    let startIdx = rawStartIdx;
+    for (const claimed of claimedRanges) {
+      if (startIdx >= claimed.startIdx && startIdx <= claimed.endIdx) {
+        startIdx = claimed.endIdx + 1;
+      }
+    }
+
+    if (startIdx >= words.length - 1) return;
+
+    // Find the next claimed range boundary to prevent extending into another clip
+    let nextBarrierIdx = words.length - 1;
+    for (const claimed of claimedRanges) {
+      if (claimed.startIdx > startIdx && claimed.startIdx <= nextBarrierIdx) {
+        nextBarrierIdx = claimed.startIdx - 1;
+      }
+    }
+
+    if (nextBarrierIdx <= startIdx) return;
+
+    const availableWindowDuration = words[nextBarrierIdx].end - words[startIdx].start;
+    if (availableWindowDuration < Math.min(targetMinDuration, 55) && totalSourceDuration >= 60) {
+      return; // Gap too small for a full YouTube video clip
+    }
+
+    let endIdx = Math.max(startIdx, Math.min(rawEndIdx, nextBarrierIdx));
     let startWord = words[startIdx];
     let endWord = words[endIdx];
     let currentDuration = endWord.end - startWord.start;
 
-    // Minimum duration guard: strictly ensure duration >= 60 seconds (1:00) if source video permits
-    const maxAvailableDuration = words[words.length - 1].end - words[0].start;
-    const targetMinDuration = Math.min(60, maxAvailableDuration);
-
-    while (currentDuration < targetMinDuration && (startIdx > 0 || endIdx < words.length - 1)) {
-      if (endIdx < words.length - 1) {
-        endIdx++;
-      } else if (startIdx > 0) {
-        startIdx--;
-      }
-      startWord = words[startIdx];
+    // Expand endIdx forward until duration is strictly greater than 60 seconds (min 61s)
+    while (currentDuration < targetMinDuration && endIdx < nextBarrierIdx) {
+      endIdx++;
       endWord = words[endIdx];
       currentDuration = endWord.end - startWord.start;
     }
 
-    // Maximum duration guard: strictly cap duration <= 179 seconds (2:59)
-    const MAX_DURATION_SECONDS = 179;
+    // Strictly cap duration <= 179 seconds (2:59 minutes)
     while (currentDuration > MAX_DURATION_SECONDS && endIdx > startIdx) {
       endIdx--;
       endWord = words[endIdx];
       currentDuration = endWord.end - startWord.start;
     }
 
+    const durationSeconds = Math.round(words[endIdx].end - words[startIdx].start);
+    if (durationSeconds < targetMinDuration - 1 && totalSourceDuration >= 60) {
+      return; // Reject clips smaller than 60s
+    }
+
     clipWords = words.slice(startIdx, endIdx + 1);
     const startTime = clipWords[0].start;
     const endTime = clipWords[clipWords.length - 1].end;
-    const durationSeconds = Math.round(endTime - startTime);
+
+    claimedRanges.push({ startIdx, endIdx, startTime, endTime });
+    claimedRanges.sort((a, b) => a.startIdx - b.startIdx);
 
     processedShorts.push({
-      id: item.id || `short_${idx + 1}`,
-      title: item.title || `Short Clip #${idx + 1}`,
-      hook: item.hook || normalized.hook || `Viral Moment #${idx + 1}`,
+      id: item.id || `short_${processedShorts.length + 1}`,
+      title: item.title || `Short Clip #${processedShorts.length + 1}`,
+      hook: item.hook || normalized.hook || `Viral Moment #${processedShorts.length + 1}`,
       viralScore: item.viral_score || Math.floor(82 + Math.random() * 16),
       startTime,
       endTime,
@@ -267,6 +297,62 @@ export const requestMultiShortFleet = async (
       notes: item.notes,
     });
   });
+
+  // If fewer than 3 clips were generated and there are still large unclaimed gaps, extract distinct clips
+  if (processedShorts.length < 3 && totalSourceDuration >= 120) {
+    let searchIdx = 0;
+    while (searchIdx < words.length - 1 && processedShorts.length < 4) {
+      const isClaimed = claimedRanges.some((r) => searchIdx >= r.startIdx && searchIdx <= r.endIdx);
+      if (isClaimed) {
+        const nextClaimed = claimedRanges.find((r) => searchIdx >= r.startIdx && searchIdx <= r.endIdx);
+        searchIdx = (nextClaimed?.endIdx ?? searchIdx) + 1;
+        continue;
+      }
+
+      let nextBoundary = words.length - 1;
+      for (const claimed of claimedRanges) {
+        if (claimed.startIdx > searchIdx && claimed.startIdx <= nextBoundary) {
+          nextBoundary = claimed.startIdx - 1;
+        }
+      }
+
+      const gapSec = words[nextBoundary].end - words[searchIdx].start;
+      if (gapSec >= 61) {
+        let targetEndIdx = searchIdx;
+        while (
+          targetEndIdx < nextBoundary &&
+          words[targetEndIdx].end - words[searchIdx].start < 75
+        ) {
+          targetEndIdx++;
+        }
+        const gapWords = words.slice(searchIdx, targetEndIdx + 1);
+        const startTime = gapWords[0].start;
+        const endTime = gapWords[gapWords.length - 1].end;
+        const durationSeconds = Math.round(endTime - startTime);
+
+        if (durationSeconds >= 60) {
+          claimedRanges.push({ startIdx: searchIdx, endIdx: targetEndIdx, startTime, endTime });
+          claimedRanges.sort((a, b) => a.startIdx - b.startIdx);
+          const clipNum = processedShorts.length + 1;
+          processedShorts.push({
+            id: `short_${clipNum}`,
+            title: `Distinct Highlight #${clipNum}`,
+            hook: gapWords.slice(0, 8).map((w) => w.text).join(" "),
+            viralScore: Math.floor(84 + Math.random() * 12),
+            startTime,
+            endTime,
+            words: gapWords,
+            durationSeconds,
+            suggestedColorGrade: "vibrant_gaming",
+            notes: "Non-overlapping distinct video highlight",
+          });
+        }
+        searchIdx = targetEndIdx + 1;
+      } else {
+        searchIdx = nextBoundary + 1;
+      }
+    }
+  }
 
   return {
     shorts: processedShorts,
