@@ -24,6 +24,8 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
 }) => {
   const [isMinimized, setIsMinimized] = useState(false);
 
+  const [dockPosition, setDockPosition] = useState<"left" | "right">("left");
+
   if (!isOpen) return null;
 
   const formatTime = (seconds: number) => {
@@ -50,7 +52,11 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
   // Minimized Widget View (Non-blocking compact floating badge)
   if (isMinimized) {
     return (
-      <div className="fixed top-20 right-4 z-40 flex items-center space-x-2 animate-in fade-in slide-in-from-right-5 duration-200">
+      <div
+        className={`fixed top-20 ${
+          dockPosition === "left" ? "left-4" : "right-4"
+        } z-40 flex items-center space-x-2 animate-in fade-in duration-200`}
+      >
         <button
           onClick={() => setIsMinimized(false)}
           className="group flex items-center space-x-2.5 px-4 py-2.5 bg-slate-900/90 hover:bg-slate-800/95 text-white rounded-full border border-indigo-500/40 shadow-2xl backdrop-blur-xl transition-all hover:scale-105 hover:border-indigo-400"
@@ -91,9 +97,13 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
     );
   }
 
-  // Expanded Floating Drawer (Positioned right below app header, compact & aligned right)
+  // Expanded Floating Drawer (Positioned on the left by default so video preview is fully visible)
   return (
-    <div className="fixed top-20 right-4 bottom-6 z-40 w-full max-w-sm bg-slate-950/90 backdrop-blur-xl border border-slate-800/80 shadow-2xl rounded-2xl flex flex-col transition-all duration-300 overflow-hidden ring-1 ring-white/10">
+    <div
+      className={`fixed top-20 ${
+        dockPosition === "left" ? "left-4" : "right-4"
+      } bottom-6 z-40 w-full max-w-sm bg-slate-950/95 backdrop-blur-xl border border-slate-800/80 shadow-2xl rounded-2xl flex flex-col transition-all duration-300 overflow-hidden ring-1 ring-white/10`}
+    >
       {/* Header */}
       <div className="p-3.5 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/40">
         <div className="flex items-center space-x-2.5">
@@ -110,6 +120,19 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
           </div>
         </div>
         <div className="flex items-center space-x-1">
+          <button
+            onClick={() =>
+              setDockPosition((prev) => (prev === "left" ? "right" : "left"))
+            }
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800/80 rounded-lg text-xs transition-colors"
+            title={
+              dockPosition === "left"
+                ? "Dock to Right"
+                : "Dock to Left (unblock preview)"
+            }
+          >
+            {dockPosition === "left" ? "👉" : "👈"}
+          </button>
           <button
             onClick={() => setIsMinimized(true)}
             className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800/80 rounded-lg text-xs transition-colors"

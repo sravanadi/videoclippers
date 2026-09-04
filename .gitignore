@@ -5,4 +5,7 @@ public/cesdk-engine
 public/cesdk-js
 venv/
 .vscode/
+*.mp4
+*.webm
+*.mov
 

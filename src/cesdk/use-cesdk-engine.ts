@@ -76,6 +76,9 @@ export const useCesdkEngine = (options: UseCesdkEngineOptions = {}) => {
 
         engineRef.current = engine;
         pageRef.current = page;
+        if (typeof window !== "undefined") {
+          (window as any).__cesdkEngine = engine;
+        }
 
         // Clean OPFS directory on initialization
         try {

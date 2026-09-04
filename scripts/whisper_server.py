@@ -38,20 +38,31 @@ def load_whisper_model():
     if model_instance is not None:
         return model_instance
 
+    has_cuda = False
     try:
-        import torch
-        if torch.cuda.is_available():
-            model_device = "cuda"
-            model_compute_type = "float16"
-            logger.info("CUDA detected. Using GPU for Whisper inference.")
-        else:
-            model_device = "cpu"
-            model_compute_type = "int8"
-            logger.info("CUDA not available. Using CPU with int8 quantization for Whisper inference.")
-    except Exception as e:
-        logger.warning(f"PyTorch CUDA check failed: {e}. Defaulting to CPU.")
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            has_cuda = True
+    except Exception:
+        pass
+
+    if not has_cuda:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                has_cuda = True
+        except Exception:
+            pass
+
+    if has_cuda:
+        model_device = "cuda"
+        # ponytail: float16 delivers maximum speed on RTX 3050; fallback to int8_float16 if OOM occurs
+        model_compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
+        logger.info(f"NVIDIA GPU CUDA detected! Using {model_device} with {model_compute_type} acceleration for Whisper inference.")
+    else:
         model_device = "cpu"
         model_compute_type = "int8"
+        logger.info("CUDA not available. Using CPU with int8 quantization for Whisper inference.")
 
     try:
         from faster_whisper import WhisperModel

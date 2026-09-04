@@ -69,7 +69,7 @@ const PreviewCanvas = ({
   const shouldShowPlayback =
     Boolean(videoFile) && showPlaybackControls && Boolean(onTogglePlayback);
   const isPlaybackDisabled = !isEngineReady || !timelineDuration;
-  const shouldShowPreview = Boolean(videoFile) && !isFaceCropPending && !isExtracting;
+  const shouldShowPreview = Boolean(videoFile) && !isExtracting;
   const formatTime = (value: number) => {
     if (!Number.isFinite(value) || value <= 0) return "0:00.00";
     const minutes = Math.floor(value / 60);
@@ -149,9 +149,9 @@ const PreviewCanvas = ({
         </div>
       )}
       {videoFile && isFaceCropPending && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-background/70 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          <span className="sr-only">Analyzing framing...</span>
+        <div className="pointer-events-none absolute top-3 right-3 z-20 flex items-center gap-1.5 rounded-md bg-black/60 px-2.5 py-1 text-xs text-white backdrop-blur-sm shadow-sm">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+          <span>Framing...</span>
         </div>
       )}
       {videoFile && !isEngineReady && !engineInitError && (

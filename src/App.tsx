@@ -57,6 +57,7 @@ import EditorModal from "@/components/shortener/editor-modal";
 import HighlightPicker from "@/components/shortener/highlight-picker";
 import ProcessingStatusCard from "@/components/shortener/processing-status-card";
 import PreviewCanvas from "@/components/shortener/preview-canvas";
+import { ExportProgressModal } from "@/components/shortener/export-progress-modal";
 import TemplatePicker from "@/components/shortener/template-picker";
 import TimelineScrubber from "@/components/shortener/timeline-scrubber";
 import TrimFocusCard from "@/components/shortener/trim-focus-card";
@@ -231,7 +232,7 @@ export default function App() {
   const [captionDebug, setCaptionDebug] = useState<
     Record<string, CaptionSegment[]> | null
   >(null);
-  const [speechProvider] = useState<SpeechToTextProvider>("elevenlabs");
+  const [speechProvider] = useState<SpeechToTextProvider>("local");
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [currentTranscriptWords, setCurrentTranscriptWords] = useState<
     TranscriptWord[]
@@ -241,6 +242,13 @@ export default function App() {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [exportProgress, setExportProgress] = useState<number>(0);
+  const [exportStatusText, setExportStatusText] = useState<string>("");
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isExportComplete, setIsExportComplete] = useState<boolean>(false);
+  const [exportClipTitle, setExportClipTitle] = useState<string>("Short Video Clip");
+  const [exportClipDuration, setExportClipDuration] = useState<number>(30);
+  const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [multiShorts, setMultiShorts] = useState<ShortClipCandidate[]>([]);
   const [activeShortClipId, setActiveShortClipId] = useState<string | null>(null);
   const [isMultiShortDrawerOpen, setIsMultiShortDrawerOpen] = useState(false);
@@ -2057,9 +2065,7 @@ export default function App() {
           }
         }
       } finally {
-        if (runId === faceCropRunIdRef.current) {
-          setIsFaceCropPending(false);
-        }
+        setIsFaceCropPending(false);
       }
     },
     [detectFaceForClip, loadFaceModels, sourceVideoSize, targetAspectRatioId]
@@ -2479,9 +2485,7 @@ export default function App() {
           }
         }
       } finally {
-        if (runId === faceCropRunIdRef.current) {
-          setIsFaceCropPending(false);
-        }
+        setIsFaceCropPending(false);
       }
     },
     [
@@ -3477,37 +3481,9 @@ export default function App() {
       videoTrackRef.current = null;
     }
 
-    let targetUploadFile = file;
-    try {
-      if (file && file.size > 0) {
-        console.log("[Remux] Checking MP4 container structure for:", file.name);
-        const input = new Input({
-          source: new BlobSource(file),
-          formats: ALL_FORMATS,
-        });
-        const target = new BufferTarget();
-        const output = new Output({
-          format: new Mp4OutputFormat(),
-          target,
-        });
-        const conversion = await Conversion.init({
-          input,
-          output,
-        });
-        await conversion.execute();
-        if (target.buffer && target.buffer.byteLength > 0) {
-          console.log("[Remux] MP4 remuxed to standard ISOBMFF. Remuxed size:", target.buffer.byteLength);
-          const sanitizedRemuxName = file.name.replace(/\.[^/.]+$/, "") + "_clean.mp4";
-          targetUploadFile = new File([target.buffer], sanitizedRemuxName, { type: "video/mp4" });
-        }
-      }
-    } catch (remuxErr) {
-      console.warn("[Remux] Fast remux pass bypassed, using uploaded file:", remuxErr);
-    }
-
-    const blobUrl = URL.createObjectURL(targetUploadFile);
+    const blobUrl = URL.createObjectURL(file);
     const directory = await navigator.storage.getDirectory();
-    const sanitizedFileName = targetUploadFile.name
+    const sanitizedFileName = file.name
       .replace(/[<>:"|?*\x00-\x1F]/g, '')
       .replace(/\.\./g, '')
       .replace(/^\.+/, '')
@@ -3523,7 +3499,7 @@ export default function App() {
 
     const opfsFile = await directory.getFileHandle(sanitizedFileName, { create: true });
     const stream = await opfsFile.createWritable();
-    const arrayBuffer = await targetUploadFile.arrayBuffer();
+    const arrayBuffer = await file.arrayBuffer();
     await stream.write(arrayBuffer);
     await stream.close();
 
@@ -3548,9 +3524,8 @@ export default function App() {
         const videoFillId = engine.block.getFill(videoBlockId);
         if (videoFillId) {
           try {
-            // await engine.block.forceLoadAVResource(videoFillId);
-            // sleep 500ms
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Matching imgly-videoclipper-original: do not forceLoadAVResource here as it blocks on large video files
+            await new Promise((resolve) => setTimeout(resolve, 500));
           } catch (loadError) {
             console.warn("Failed to eagerly load video resource", loadError);
           }
@@ -4349,81 +4324,20 @@ export default function App() {
   ): Promise<TranscriptWord[]> => {
     try {
       setIsTranscribing(true);
-      if (speechProvider === "local") {
-        const transcriptionResult = await transcribeWithLocalWhisper(audioBlob);
-        setTranscriptDebug(transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse);
-        const words = extractOpenAITranscriptWords(
-          transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse
-        );
-        setCurrentTranscriptWords(words);
-        setAnalysisEstimate(buildAnalysisEstimate(words));
-        return words;
+      console.info("[Transcription] Running 100% local GPU Faster-Whisper transcription...");
+      const transcriptionResult = await transcribeWithLocalWhisper(audioBlob);
+      setTranscriptDebug(transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse);
+      const words = extractOpenAITranscriptWords(
+        transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse
+      );
+      if (!words || words.length === 0) {
+        throw new Error("Local Whisper did not return any recognized words.");
       }
-      if (speechProvider === "openai-whisper") {
-        const transcriptionResult = await transcribeWithOpenAI(audioBlob, {
-          enableWordTimestamps: true,
-        });
-        setTranscriptDebug(transcriptionResult.rawResponse);
-        const words = extractOpenAITranscriptWords(
-          transcriptionResult.rawResponse
-        );
-        if (!words.length) {
-          throw new Error(
-            "OpenAI Whisper did not return word timestamps. Ensure whisper-1 with word timestamps is enabled."
-          );
-        }
-        setCurrentTranscriptWords(words);
-        setAnalysisEstimate(buildAnalysisEstimate(words));
-        return words;
-      }
-      if (speechProvider === "openai-gpt4o") {
-        const transcriptionResult = await transcribeWithOpenAI(audioBlob, {
-          model: "gpt-4o-transcribe",
-          enableWordTimestamps: true,
-        });
-        setTranscriptDebug(transcriptionResult.rawResponse);
-        let words = extractOpenAITranscriptWords(
-          transcriptionResult.rawResponse
-        );
-        if (!words.length) {
-          const durationHint = sourceVideoDuration || timelineDuration;
-          console.warn(
-            "OpenAI GPT-4o did not return word timestamps; using approximations."
-          );
-          words = buildTranscriptWordsFromText(
-            transcriptionResult.transcript,
-            durationHint
-          );
-        }
-        if (!words.length) {
-          throw new Error(
-            "OpenAI GPT-4o transcription did not return usable text."
-          );
-        }
-        setCurrentTranscriptWords(words);
-        setAnalysisEstimate(buildAnalysisEstimate(words));
-        return words;
-      }
-      try {
-        const transcriptionResult = await transcribeWithElevenLabs(audioBlob);
-        setTranscriptDebug(transcriptionResult.rawResponse);
-        const words = extractTranscriptWords(transcriptionResult.rawResponse);
-        setCurrentTranscriptWords(words);
-        setAnalysisEstimate(buildAnalysisEstimate(words));
-        return words;
-      } catch (elevenLabsErr) {
-        console.warn("ElevenLabs transcription failed, falling back to Local Whisper", elevenLabsErr);
-        const localResult = await transcribeWithLocalWhisper(audioBlob);
-        setTranscriptDebug(localResult.rawResponse as unknown as OpenAITranscriptResponse);
-        const words = extractOpenAITranscriptWords(
-          localResult.rawResponse as unknown as OpenAITranscriptResponse
-        );
-        setCurrentTranscriptWords(words);
-        setAnalysisEstimate(buildAnalysisEstimate(words));
-        return words;
-      }
+      setCurrentTranscriptWords(words);
+      setAnalysisEstimate(buildAnalysisEstimate(words));
+      return words;
     } catch (error) {
-      console.error("Failed to transcribe audio", error);
+      console.error("[Transcription] Local Whisper failed:", error);
       const message =
         error instanceof Error ? error.message : "Failed to transcribe audio";
       throw error instanceof Error ? error : new Error(message);
@@ -4945,10 +4859,15 @@ export default function App() {
           setTargetAspectRatioId("9:16");
           updateProcessingStatus("analysis", "complete");
           updateProcessingStatus("preload", "complete");
-          beginWorkflow();
           setAutoProcessing(false);
           setAutoProcessingError(null);
-          applyTranscriptCuts(words, firstShort.words, firstShort.hook);
+          await applyTranscriptCuts(
+            words,
+            firstShort.words,
+            firstShort.hook,
+            "9:16",
+            { start: firstShort.startTime, end: firstShort.endTime }
+          );
         }
         return;
       }
@@ -6099,10 +6018,12 @@ export default function App() {
   const applyTranscriptCuts = async (
     sourceWords: TranscriptWord[],
     refinedWords: TranscriptWord[],
-    hookText?: string | null
+    hookText?: string | null,
+    aspectRatioOverride?: string,
+    fallbackRange?: { start: number; end: number }
   ) => {
     const engine = engineRef.current;
-    if (!engine || !sourceWords.length || !refinedWords.length) return;
+    if (!engine || !sourceWords.length) return;
     if (audioBlockRef.current && engine.block.isValid(audioBlockRef.current)) {
       try {
         engine.block.destroy(audioBlockRef.current);
@@ -6112,8 +6033,9 @@ export default function App() {
     }
     audioBlockRef.current = null;
 
+    const effectiveAspectRatio = aspectRatioOverride ?? targetAspectRatioId;
     applySceneAspectRatio(
-      targetAspectRatioId,
+      effectiveAspectRatio,
       sourceVideoSize ?? { width: 1920, height: 1080 }
     );
 
@@ -6155,16 +6077,31 @@ export default function App() {
         (pageRef.current ? engine.block.getDuration(pageRef.current) : 0);
     }
 
-    const keepRanges = buildKeepRangesFromWords(
-      sourceWords,
-      refinedWords,
-      totalDuration,
-      MIN_CLIP_DURATION_SECONDS
-    );
+    let keepRanges = refinedWords.length
+      ? buildKeepRangesFromWords(
+          sourceWords,
+          refinedWords,
+          totalDuration,
+          MIN_CLIP_DURATION_SECONDS
+        )
+      : [];
+
+    // ponytail: fallback to explicit clip range or refined timestamps if word alignment returned empty
+    if (!keepRanges.length) {
+      if (fallbackRange && fallbackRange.end > fallbackRange.start) {
+        keepRanges = [{ start: fallbackRange.start, end: fallbackRange.end }];
+      } else if (refinedWords.length > 0) {
+        const start = Math.max(0, refinedWords[0].start);
+        const end = Math.min(totalDuration || 9999, refinedWords[refinedWords.length - 1].end);
+        if (end > start) {
+          keepRanges = [{ start, end }];
+        }
+      }
+    }
 
     if (!keepRanges.length) {
-      console.warn("Gemini refinement did not match any transcript ranges.");
-      return;
+      console.warn("No ranges found, using full clip fallback range.");
+      keepRanges = [{ start: 0, end: totalDuration || 30 }];
     }
 
     const speakerResolvedWords = mapTrimmedWordsToSource(
@@ -6177,12 +6114,20 @@ export default function App() {
     const splitRanges = splitRangesBySpeaker(keepRanges, speakerWords);
     const resolvedKeepRanges = splitRanges.length ? splitRanges : keepRanges;
 
+    // Detach template from parent so track child destruction never destroys the template
     if (
       !videoTemplateRef.current ||
       !engine.block.isValid(videoTemplateRef.current)
     ) {
       try {
-        videoTemplateRef.current = engine.block.duplicate(templateSource, false);
+        const clone = engine.block.duplicate(templateSource, false);
+        const parent = engine.block.getParent(clone);
+        if (parent && engine.block.isValid(parent)) {
+          try {
+            engine.block.removeChild(parent, clone);
+          } catch {}
+        }
+        videoTemplateRef.current = clone;
       } catch (error) {
         console.warn("Failed to create persistent video template", error);
       }
@@ -6336,6 +6281,17 @@ export default function App() {
         void applySpeakerTemplate(templateId);
       }
     }
+
+    if (pageRef.current && engine.block.isValid(pageRef.current)) {
+      try {
+        void engine.scene.zoomToBlock(pageRef.current, { padding: 0 });
+      } catch {}
+      window.setTimeout(() => {
+        if (pageRef.current && engine.block.isValid(pageRef.current)) {
+          void engine.scene.zoomToBlock(pageRef.current, { padding: 0 });
+        }
+      }, 150);
+    }
   };
 
   const getTranscriptWordsSnapshot = (): TranscriptWord[] => {
@@ -6354,7 +6310,7 @@ export default function App() {
     setIsEditorOpen(false);
   };
 
-  const handleExport = async () => {
+  const handleExport = async (clipMeta?: { title?: string; duration?: number }) => {
     if (isExporting) return;
     const engine = engineRef.current;
     const pageId = pageRef.current;
@@ -6363,28 +6319,77 @@ export default function App() {
       return;
     }
 
+    const currentShort = multiShorts.find((s) => s.id === activeShortClipId);
+    const title =
+      clipMeta?.title ||
+      currentShort?.title ||
+      (videoFile?.name ? videoFile.name.replace(/\.[^/.]+$/, "") : "Short Video Clip");
+    const duration =
+      clipMeta?.duration ||
+      currentShort?.durationSeconds ||
+      Math.round(sourceVideoDuration || 30);
+
+    setExportClipTitle(title);
+    setExportClipDuration(duration);
+    setExportProgress(0);
+    setExportStatusText("Initializing video render pipeline...");
+    setIsExportComplete(false);
+    setIsExportModalOpen(true);
     setIsExporting(true);
     setExportError(null);
+
+    let currentPct = 5;
+    const ticker = setInterval(() => {
+      currentPct = Math.min(92, currentPct + Math.max(0.5, (90 - currentPct) * 0.08));
+      setExportProgress(Math.round(currentPct));
+      if (currentPct < 30) {
+        setExportStatusText(
+          `Rendering frames: ${Math.round(currentPct * 0.3 * duration)} / ${Math.round(duration * 30)}`
+        );
+      } else if (currentPct < 70) {
+        setExportStatusText(`Encoding audio & video tracks (${Math.round(currentPct)}%)...`);
+      } else {
+        setExportStatusText(`Finalizing MP4 container (${Math.round(currentPct)}%)...`);
+      }
+    }, 250);
+
     try {
-      const blob = await engine.block.exportVideo(pageId, {
-        mimeType: "video/mp4",
-      });
+      const blob = await (engine.block as any).exportVideo(
+        pageId,
+        {
+          mimeType: "video/mp4",
+        },
+        (renderedFrames: number, encodedFrames: number, totalFrames: number) => {
+          if (totalFrames > 0) {
+            const pct = Math.min(98, Math.max(5, Math.round((encodedFrames / totalFrames) * 100)));
+            currentPct = Math.max(currentPct, pct);
+            setExportProgress(currentPct);
+            setExportStatusText(`Exporting: frame ${encodedFrames} of ${totalFrames} (${currentPct}%)`);
+          }
+        }
+      );
+
+      clearInterval(ticker);
+      setExportProgress(100);
+      setExportStatusText("Video export complete!");
+      setIsExportComplete(true);
+
       const url = URL.createObjectURL(blob);
+      setExportedVideoUrl(url);
       const link = document.createElement("a");
-      const baseName = videoFile?.name
-        ? videoFile.name.replace(/\.[^/.]+$/, "")
-        : "video-short";
+      const baseName = title.replace(/[^a-zA-Z0-9_-]/g, "_");
       link.href = url;
-      link.download = `${baseName}-short.mp4`;
+      link.download = `${baseName}.mp4`;
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(url);
     } catch (error) {
+      clearInterval(ticker);
       console.error("Failed to export video", error);
-      setExportError(
-        error instanceof Error ? error.message : "Failed to export video."
-      );
+      const errMsg =
+        error instanceof Error ? error.message : "Failed to export video.";
+      setExportError(errMsg);
+      setExportStatusText(`Export failed: ${errMsg}`);
     } finally {
       setIsExporting(false);
     }
@@ -6406,10 +6411,15 @@ export default function App() {
         setActiveShortClipId(firstShort.id);
         setIsMultiShortDrawerOpen(true);
         setTargetAspectRatioId("9:16");
-        beginWorkflow();
         setAutoProcessing(false);
         setAutoProcessingError(null);
-        applyTranscriptCuts(words, firstShort.words, firstShort.hook);
+        await applyTranscriptCuts(
+          words,
+          firstShort.words,
+          firstShort.hook,
+          "9:16",
+          { start: firstShort.startTime, end: firstShort.endTime }
+        );
       } else {
         alert("No short clip candidates were extracted.");
       }
@@ -6421,23 +6431,37 @@ export default function App() {
     }
   };
 
-  const handleSelectShortClip = (short: ShortClipCandidate) => {
+  const handleSelectShortClip = async (short: ShortClipCandidate) => {
     const words = currentTranscriptWords;
     setActiveShortClipId(short.id);
     setTargetAspectRatioId("9:16");
-    applyTranscriptCuts(words, short.words, short.hook);
+    setIsFaceCropPending(false);
+    await applyTranscriptCuts(
+      words,
+      short.words,
+      short.hook,
+      "9:16",
+      { start: short.startTime, end: short.endTime }
+    );
   };
 
   const handleExportSingleShort = async (short: ShortClipCandidate) => {
-    handleSelectShortClip(short);
-    await handleExport();
+    await handleSelectShortClip(short);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await handleExport({ title: short.title, duration: short.durationSeconds });
   };
 
   const handleExportAllShorts = async () => {
     if (!multiShorts.length) return;
-    for (const short of multiShorts) {
-      handleSelectShortClip(short);
-      await handleExport();
+    for (let i = 0; i < multiShorts.length; i++) {
+      const short = multiShorts[i];
+      await handleSelectShortClip(short);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await handleExport({
+        title: `${short.title} (${i + 1} of ${multiShorts.length})`,
+        duration: short.durationSeconds,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 800));
     }
   };
 
@@ -7170,9 +7194,7 @@ export default function App() {
                 <div className="overflow-hidden">
                   <PreviewCanvas
                     {...previewCanvasProps}
-                    showControls={
-                      shouldShowOverlayControls && !isFaceCropPending
-                    }
+                    showControls={shouldShowOverlayControls}
                     showPlaybackControls={false}
                     enableUpload={false}
                     engineCanvasContainerRef={
@@ -7264,6 +7286,18 @@ export default function App() {
           onExportClip={handleExportSingleShort}
           onExportAll={handleExportAllShorts}
           isExporting={isExporting}
+        />
+        <ExportProgressModal
+          isOpen={isExportModalOpen}
+          onClose={() => setIsExportModalOpen(false)}
+          progress={exportProgress}
+          statusText={exportStatusText}
+          isComplete={isExportComplete}
+          error={exportError}
+          clipTitle={exportClipTitle}
+          aspectRatio={targetAspectRatioId}
+          duration={exportClipDuration}
+          downloadUrl={exportedVideoUrl}
         />
         <DebugModal
           isOpen={isDebugOpen}

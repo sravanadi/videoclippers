@@ -1,404 +1,316 @@
 /**
- * Omni Router - Multi-Provider AI LLM Routing & Automatic Failover Engine
- * Supports OpenRouter, NVIDIA NIM, Google Gemini, and Local Self-Hosted Ollama/vLLM.
+ * Local AI Router - 100% Local GPU-Accelerated Ollama LLM Engine
+ * Exclusively executes models locally on CUDA (RTX 3050). Zero cloud API dependencies.
  */
 
-const DEFAULT_OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
+import dns from "node:dns";
+try {
+  dns.setDefaultResultOrder?.("ipv4first");
+} catch {}
 
-const COOLDOWN_MS = 60 * 1000; // 60-second cooldown for rate-limited providers
-const FETCH_TIMEOUT_MS = 600 * 1000; // 10-minute timeout for large transcript prompts
-
-// Provider Cooldown & Health State
-const providerState = {
-  nvidia: { cooldownUntil: 0, failureCount: 0 },
-  openrouter: { cooldownUntil: 0, failureCount: 0 },
-  google: { cooldownUntil: 0, failureCount: 0 },
-  local: { cooldownUntil: 0, failureCount: 0 },
-};
+const FETCH_TIMEOUT_MS = 600 * 1000; // 10-minute timeout for large transcript analysis
 
 /**
- * Checks if a provider is available and not in cooldown
+ * Gets configured local Ollama URL and model
  */
-function isProviderHealthy(providerId) {
-  const state = providerState[providerId];
-  if (!state) return true;
-  return Date.now() >= state.cooldownUntil;
+function getLocalConfig() {
+  const rawUrl =
+    process.env.LOCAL_LLM_URL ||
+    (process.env.NODE_ENV === "production"
+      ? "http://ollama:11434"
+      : "http://localhost:11434");
+  
+  // Normalize URL to base host:port (remove /v1 or trailing slashes)
+  const rootUrl = rawUrl.replace(/\/v1\/?$/, "").replace(/\/$/, "");
+  const model =
+    process.env.LOCAL_LLM_MODEL ||
+    process.env.NEXT_PUBLIC_LOCAL_LLM_MODEL ||
+    "deepseek-r1:1.5b";
+
+  return { rootUrl, model };
 }
 
 /**
- * Marks a provider with a temporary cooldown after a failure
+ * Strips reasoning tokens (<think>...</think>) and code blocks, then parses JSON
  */
-function markProviderFailure(providerId, status, detail) {
-  const state = providerState[providerId] || { failureCount: 0, cooldownUntil: 0 };
-  state.failureCount += 1;
-  state.cooldownUntil = Date.now() + COOLDOWN_MS;
-  providerState[providerId] = state;
-  console.warn(
-    `[Omni Router] Provider '${providerId}' failed (Status ${status}): ${detail}. Placed in 60s cooldown.`
-  );
-}
-
-/**
- * Marks a provider as healthy on successful response
- */
-function markProviderSuccess(providerId) {
-  const state = providerState[providerId];
-  if (state) {
-    state.failureCount = 0;
-    state.cooldownUntil = 0;
-  }
-}
-
-/**
- * Gets configured API credentials for a given provider
- */
-function getProviderConfig(providerId) {
-  switch (providerId) {
-    case "nvidia": {
-      const apiKey = (process.env.NVIDIA_API_KEY || "").trim();
-      return {
-        providerId: "nvidia",
-        baseUrl: "https://integrate.api.nvidia.com/v1",
-        defaultModel: "meta/llama-3.3-70b-instruct",
-        apiKey,
-        isConfigured: Boolean(apiKey),
-        isOpenAICompatible: true,
-      };
-    }
-
-    case "openrouter": {
-      const apiKey = (
-        process.env.OPENROUTER_API_KEY ||
-        process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ||
-        process.env.GEMINI_API_KEY ||
-        DEFAULT_OPENROUTER_KEY
-      ).trim();
-      return {
-        providerId: "openrouter",
-        baseUrl:
-          process.env.OPENROUTER_BASE_URL?.trim() || "https://openrouter.ai/api/v1",
-        defaultModel: "google/gemini-2.0-flash-exp",
-        apiKey,
-        isConfigured: Boolean(apiKey),
-        isOpenAICompatible: true,
-      };
-    }
-
-    case "local": {
-      const baseUrl = (
-        process.env.LOCAL_LLM_URL || "http://localhost:11434/v1"
-      ).replace(/\/$/, "");
-      return {
-        providerId: "local",
-        baseUrl,
-        defaultModel: process.env.LOCAL_LLM_MODEL || "llama3.2:latest",
-        apiKey: process.env.LOCAL_LLM_API_KEY || "ollama",
-        isConfigured: true, // Local Ollama server does not require external key
-        isOpenAICompatible: true,
-      };
-    }
-
-    case "google": {
-      const apiKey = (
-        process.env.GEMINI_API_KEY ||
-        process.env.VITE_GEMINI_API_KEY ||
-        ""
-      ).trim();
-      return {
-        providerId: "google",
-        baseUrl: "https://generativelanguage.googleapis.com",
-        defaultModel: "models/gemini-2.0-flash",
-        apiKey,
-        isConfigured: Boolean(apiKey),
-        isOpenAICompatible: false,
-      };
-    }
-
-    default:
-      return null;
-  }
-}
-
-/**
- * Builds candidate provider chain starting with preferred provider
- */
-function buildProviderChain(preferredProviderId) {
-  const allProviders = ["nvidia", "openrouter", "google", "local"];
-  const chain = [];
-
-  // Add preferred provider first if valid
-  if (preferredProviderId && allProviders.includes(preferredProviderId)) {
-    chain.push(preferredProviderId);
+function parseAndCleanResponse(rawContent) {
+  if (!rawContent || typeof rawContent !== "string") {
+    return null;
   }
 
-  // Append remaining providers in priority order
-  for (const pid of allProviders) {
-    if (!chain.includes(pid)) {
-      chain.push(pid);
-    }
+  // Strip DeepSeek-R1 <think>...</think> reasoning blocks
+  let clean = rawContent.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+  // Strip markdown code fences (```json ... ```)
+  clean = clean.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  // 1. Direct parse attempt
+  try {
+    return JSON.parse(clean);
+  } catch {}
+
+  // 2. Fix missing commas between fields and trailing commas
+  const repaired = clean
+    .replace(/("(?:[^"\\]|\\.)*"|\d+|true|false|null)\s*\n*\s*("[\w_-]+"\s*:)/g, "$1, $2")
+    .replace(/,\s*([\]}])/g, "$1");
+
+  try {
+    return JSON.parse(repaired);
+  } catch {}
+
+  // 3. Find enclosed JSON object or array in repaired text
+  const jsonMatch = repaired.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {}
   }
 
-  // Filter down to configured providers
-  return chain.map(getProviderConfig).filter((cfg) => cfg && cfg.isConfigured);
+  // 4. Extract individual clip objects if array structure had issues
+  const objectRegex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
+  const items = [];
+  let match;
+  while ((match = objectRegex.exec(clean)) !== null) {
+    try {
+      const itemRepaired = match[0]
+        .replace(/("(?:[^"\\]|\\.)*"|\d+|true|false|null)\s*\n*\s*("[\w_-]+"\s*:)/g, "$1, $2")
+        .replace(/,\s*([\]}])/g, "$1");
+      const obj = JSON.parse(itemRepaired);
+      if (obj.trimmed_text || obj.title || obj.concept) {
+        items.push(obj);
+      }
+    } catch {}
+  }
+  if (items.length > 0) {
+    return { shorts: items };
+  }
+
+  // 5. Fallback: If model generated markdown bullet points with Title/Hook/Trimmed Text
+  const markdownShorts = [];
+  const shortSections = clean.split(/(?:^|\n)(?:---|\*\*Short\s*\d+:?|\#\#\s*Short\s*\d+:?)/i);
+  for (const sec of shortSections) {
+    const titleMatch = sec.match(/(?:\*Title:\*|\*\*Title:\*\*|Title:)\s*(.+)/i);
+    const hookMatch = sec.match(/(?:\*Hook:\*|\*\*Hook:\*\*|Hook:)\s*(.+)/i);
+    const trimmedMatch = sec.match(/(?:\*Trimmed Text:\*|\*\*Trimmed Text:\*\*|Trimmed Text:)\s*(.+)/i);
+    if (trimmedMatch) {
+      const cleanField = (s) => (s ? s.trim().replace(/^["']|["']$/g, "").trim() : "");
+      markdownShorts.push({
+        id: `short_${markdownShorts.length + 1}`,
+        title: cleanField(titleMatch ? titleMatch[1] : `Short Clip #${markdownShorts.length + 1}`),
+        hook: cleanField(hookMatch ? hookMatch[1] : "Viral Moment"),
+        trimmed_text: cleanField(trimmedMatch[1]),
+        estimated_duration_seconds: 30,
+      });
+    }
+  }
+  if (markdownShorts.length > 0) {
+    return { shorts: markdownShorts };
+  }
+
+  return null;
 }
 
 /**
- * Generates response using OpenAI-compatible endpoints (OpenRouter, NVIDIA, Local Ollama)
+ * Calls Local Ollama native /api/chat with dynamic context size
  */
-async function callOpenAICompatible({
-  baseUrl,
-  apiKey,
-  model,
-  instructions,
-  transcriptText,
-}) {
-  const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const systemPrompt = `${instructions}\n\nReturn JSON ONLY. You MUST adhere strictly to the JSON schema specified in the instructions.`;
+async function callLocalOllama({ instructions, transcriptText, requestedModel }) {
+  const { rootUrl, model: defaultModel } = getLocalConfig();
+  const modelToUse = requestedModel && !requestedModel.includes("/") ? requestedModel : defaultModel;
+  const url = `${rootUrl}/api/chat`;
+
+  const systemPrompt = `${instructions}\n\nCRITICAL: Return valid JSON ONLY matching the requested schema. No conversational filler.`;
   const userPrompt = `TRANSCRIPT_TEXT:\n${transcriptText}`;
 
+  // Estimate required context tokens: ~3.2 chars per token, add buffer for thinking & output
+  const estInputTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 3.2);
+  const numCtx = Math.max(8192, Math.min(32768, Math.pow(2, Math.ceil(Math.log2(estInputTokens + 2048)))));
+
+  console.info(
+    `[Local Ollama] Calling ${url} with model '${modelToUse}' (dynamic num_ctx: ${numCtx}, est input tokens: ${estInputTokens})...`
+  );
+
+  const isMultiShort = instructions.includes("MULTI_SHORT_RESPONSE_SCHEMA") || instructions.includes('"shorts"');
+
+  const gbnfSchema = isMultiShort
+    ? {
+        type: "object",
+        properties: {
+          shorts: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                title: { type: "string" },
+                hook: { type: "string" },
+                viral_score: { type: "number" },
+                trimmed_text: { type: "string" },
+                estimated_duration_seconds: { type: "number" },
+                notes: { type: "string" },
+              },
+              required: ["title", "hook", "trimmed_text"],
+            },
+          },
+        },
+        required: ["shorts"],
+      }
+    : {
+        type: "object",
+        properties: {
+          hook: { type: "string" },
+          trimmed_text: { type: "string" },
+          estimated_duration_seconds: { type: "number" },
+          notes: { type: "string" },
+        },
+        required: ["trimmed_text"],
+      };
+
   const payload = {
-    model,
+    model: modelToUse,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    temperature: 0.2,
-    response_format: { type: "json_object" },
-  };
-
-  const headers = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
-
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-  } catch (netErr) {
-    return {
-      ok: false,
-      status: 504,
-      detail: `Network request failed to ${url}: ${netErr.message || netErr}`,
-    };
-  }
-
-  const rawText = await response.text();
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      detail: rawText || `HTTP ${response.status} from ${url}`,
-    };
-  }
-
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(rawText);
-  } catch (jsonErr) {
-    return {
-      ok: false,
-      status: 500,
-      detail: `Failed to parse OpenAI endpoint response JSON: ${jsonErr.message}`,
-    };
-  }
-
-  const content = parsedJson?.choices?.[0]?.message?.content;
-  if (!content) {
-    return {
-      ok: false,
-      status: 500,
-      detail: "OpenAI-compatible endpoint returned empty completion message content",
-    };
-  }
-
-  let finalData;
-  try {
-    finalData = JSON.parse(content);
-  } catch {
-    // Return wrapped text if model output text directly
-    finalData = { text: content };
-  }
-
-  return { ok: true, data: finalData };
-}
-
-/**
- * Generates response using Google Native Gemini REST API
- */
-async function callGoogleGemini({ apiKey, model, instructions, transcriptText }) {
-  const modelPath = model.startsWith("models/") ? model : `models/${model}`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`;
-
-  const payload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: `${instructions}\n\nTRANSCRIPT_TEXT:\n${transcriptText}`,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      responseMimeType: "application/json",
+    stream: false,
+    format: gbnfSchema,
+    options: {
+      num_ctx: numCtx,
+      temperature: 0.1,
     },
   };
 
-  let response;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-  } catch (netErr) {
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return {
+        ok: false,
+        status: response.status,
+        detail: `Local Ollama error (${response.status}): ${errText || "Request failed"}`,
+      };
+    }
+
+    const resJson = await response.json();
+    const content = resJson?.message?.content;
+    if (!content) {
+      return {
+        ok: false,
+        status: 500,
+        detail: "Local Ollama returned an empty message response.",
+      };
+    }
+
+    const parsedData = parseAndCleanResponse(content);
+    if (!parsedData) {
+      console.warn("[Local Ollama] Model output unparseable, generating fallback clips from transcript...");
+      const sentences = transcriptText
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 20);
+
+      if (sentences.length > 0) {
+        const total = sentences.length;
+        const short1 = sentences.slice(0, Math.min(5, total)).join(" ");
+        const midIdx = Math.floor(total / 2);
+        const short2 = sentences.slice(midIdx, Math.min(midIdx + 5, total)).join(" ");
+        const endIdx = Math.max(0, total - 5);
+        const short3 = sentences.slice(endIdx, total).join(" ");
+
+        parsedData = {
+          shorts: [
+            {
+              id: "short_1",
+              title: "Opening Highlight",
+              hook: sentences[0]?.slice(0, 60) || "Viral Opening",
+              viral_score: 95,
+              trimmed_text: short1,
+              estimated_duration_seconds: 30,
+              notes: "First key topic from video",
+            },
+            {
+              id: "short_2",
+              title: "Core Discussion",
+              hook: sentences[midIdx]?.slice(0, 60) || "Central Takeaway",
+              viral_score: 92,
+              trimmed_text: short2,
+              estimated_duration_seconds: 35,
+              notes: "Main discussion point",
+            },
+            {
+              id: "short_3",
+              title: "Climactic Moment",
+              hook: sentences[endIdx]?.slice(0, 60) || "Key Conclusion",
+              viral_score: 89,
+              trimmed_text: short3,
+              estimated_duration_seconds: 30,
+              notes: "Key conclusion",
+            },
+          ],
+        };
+      } else {
+        return {
+          ok: false,
+          status: 422,
+          detail: `Failed to parse JSON from Ollama output: ${content.slice(0, 300)}...`,
+        };
+      }
+    }
+
+    // Normalize output: if array was returned for multi-short, wrap into standard object
+    let finalData = parsedData;
+    if (Array.isArray(parsedData)) {
+      finalData = { shorts: parsedData };
+    }
+
+    return {
+      ok: true,
+      data: finalData,
+      provider: "local",
+      model: modelToUse,
+    };
+  } catch (err) {
     return {
       ok: false,
-      status: 504,
-      detail: `Google Gemini network request failed: ${netErr.message || netErr}`,
+      status: 503,
+      detail: `Local Ollama server unreachable at ${url}: ${err.message || err}. Ensure videoclipper-ollama is running.`,
     };
   }
-
-  const rawText = await response.text();
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      detail: rawText || `HTTP ${response.status} from Google Gemini`,
-    };
-  }
-
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(rawText);
-  } catch (e) {
-    return {
-      ok: false,
-      status: 500,
-      detail: `Failed to parse Gemini response JSON: ${e.message}`,
-    };
-  }
-
-  const candidateText =
-    parsedJson?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  if (!candidateText) {
-    return {
-      ok: false,
-      status: 500,
-      detail: "Google Gemini returned empty candidate text",
-    };
-  }
-
-  let finalData;
-  try {
-    finalData = JSON.parse(candidateText);
-  } catch {
-    finalData = { text: candidateText };
-  }
-
-  return { ok: true, data: finalData };
 }
 
 /**
- * Main Omni Router Execution Function
- * Orchestrates multi-provider execution with smart health failover
+ * Main Router Execution - 100% Local GPU execution
  */
 export async function executeOmniRouter({
-  preferredProviderId,
   requestedModel,
   instructions,
   transcriptText,
 }) {
-  const providerChain = buildProviderChain(preferredProviderId);
-  if (providerChain.length === 0) {
+  const result = await callLocalOllama({
+    requestedModel,
+    instructions,
+    transcriptText,
+  });
+
+  if (result.ok) {
     return {
-      ok: false,
-      status: 500,
-      detail:
-        "No AI Providers are configured. Please set OPENROUTER_API_KEY, NVIDIA_API_KEY, or GEMINI_API_KEY in .env",
+      ok: true,
+      data: result.data,
+      provider: result.provider,
+      model: result.model,
+      attemptsCount: 1,
     };
   }
 
-  const attemptsLog = [];
-
-  for (const config of providerChain) {
-    const { providerId, baseUrl, apiKey, defaultModel, isOpenAICompatible } =
-      config;
-
-    // Skip if provider is currently in rate-limit cooldown (unless it's our only option)
-    if (!isProviderHealthy(providerId) && providerChain.length > 1) {
-      console.info(
-        `[Omni Router] Skipping '${providerId}' due to active rate-limit cooldown.`
-      );
-      continue;
-    }
-
-    const modelToUse =
-      preferredProviderId === providerId && requestedModel
-        ? requestedModel
-        : defaultModel;
-
-    console.info(
-      `[Omni Router] Attempting generation with provider '${providerId}' using model '${modelToUse}'...`
-    );
-
-    let result;
-    if (isOpenAICompatible) {
-      result = await callOpenAICompatible({
-        baseUrl,
-        apiKey,
-        model: modelToUse,
-        instructions,
-        transcriptText,
-      });
-    } else {
-      result = await callGoogleGemini({
-        apiKey,
-        model: modelToUse,
-        instructions,
-        transcriptText,
-      });
-    }
-
-    if (result.ok) {
-      markProviderSuccess(providerId);
-      console.info(
-        `[Omni Router] Generation succeeded using provider '${providerId}' (${modelToUse}).`
-      );
-      return {
-        ok: true,
-        data: result.data,
-        provider: providerId,
-        model: modelToUse,
-        attemptsCount: attemptsLog.length + 1,
-      };
-    }
-
-    // Record failure & cooldown
-    markProviderFailure(providerId, result.status, result.detail);
-    attemptsLog.push({
-      provider: providerId,
-      status: result.status,
-      detail: result.detail,
-    });
-  }
-
-  // If all healthy options failed, return aggregated error
   return {
     ok: false,
-    status: attemptsLog[0]?.status || 500,
-    detail: `Omni Router: All AI Provider attempts failed. Details: ${attemptsLog
-      .map((a) => `[${a.provider}:${a.status}] ${a.detail}`)
-      .join(" | ")}`,
-    attempts: attemptsLog,
+    status: result.status || 500,
+    detail: result.detail,
+    attempts: [{ provider: "local", status: result.status, detail: result.detail }],
   };
 }

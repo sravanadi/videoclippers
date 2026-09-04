@@ -11,13 +11,17 @@ WORKDIR /app
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install python dependencies
-RUN pip install --no-cache-dir \
+# Install python dependencies with NVIDIA CUDA and cuDNN acceleration for faster-whisper
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install --no-cache-dir \
     fastapi \
     uvicorn \
     python-multipart \
     faster-whisper \
-    torch --extra-index-url https://download.pytorch.org/whl/cpu
+    nvidia-cublas-cu12 \
+    nvidia-cudnn-cu12
+
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
 
 # Copy scripts directory
 COPY scripts/ /app/scripts/

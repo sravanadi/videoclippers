@@ -7,3 +7,7 @@ venv
 Dockerfile*
 docker-compose.yml
 test_audio.wav
+*.mp4
+*.mkv
+*.mov
+*.webm

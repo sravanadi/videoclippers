@@ -30,17 +30,11 @@ export const requestGeminiRefinement = async (
   shorteningMode: RefinementMode,
   options?: GeminiRefinementOptions
 ): Promise<{ refinement: GeminiRefinement; fileUploadUsed: boolean; rawText: string }> => {
-  const geminiProvider =
-    process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim().toLowerCase() ||
-    "openrouter";
-  const defaultClientModel =
-    geminiProvider === "nvidia"
-      ? "meta/llama-3.2-11b-vision-instruct"
-      : geminiProvider === "openrouter"
-      ? "google/gemini-2.0-flash-exp"
-      : "models/gemini-2.5-flash-lite";
+  const geminiProvider = "local";
   const model =
-    process.env.NEXT_PUBLIC_GEMINI_MODEL?.trim() || defaultClientModel;
+    process.env.NEXT_PUBLIC_LOCAL_LLM_MODEL?.trim() ||
+    process.env.NEXT_PUBLIC_GEMINI_MODEL?.trim() ||
+    "deepseek-r1:1.5b";
 
   const proxyBase =
     process.env.NEXT_PUBLIC_GEMINI_PROXY_URL?.replace(/\/$/, "") ?? "";
@@ -123,14 +117,11 @@ export const requestGeminiRefinement = async (
 export const requestMultiShortFleet = async (
   words: TranscriptWord[]
 ): Promise<{ shorts: import("./multiShortTypes").ShortClipCandidate[]; rawText: string }> => {
-  const geminiProvider =
-    process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim() || "google";
-  const defaultClientModel =
-    geminiProvider === "openrouter"
-      ? "google/gemini-2.0-flash-exp"
-      : "models/gemini-2.5-flash-lite";
+  const geminiProvider = "local";
   const model =
-    process.env.NEXT_PUBLIC_GEMINI_MODEL?.trim() || defaultClientModel;
+    process.env.NEXT_PUBLIC_LOCAL_LLM_MODEL?.trim() ||
+    process.env.NEXT_PUBLIC_GEMINI_MODEL?.trim() ||
+    "deepseek-r1:1.5b";
 
   const proxyBase =
     process.env.NEXT_PUBLIC_GEMINI_PROXY_URL?.replace(/\/$/, "") ?? "";
@@ -161,11 +152,22 @@ export const requestMultiShortFleet = async (
   }
 
   const data = await response.json();
-  let parsed: { shorts?: import("./multiShortTypes").RawShortCandidate[] } | null = null;
+  let rawShorts: any[] = [];
   let rawText = "";
 
-  if (data && typeof data === "object" && Array.isArray(data.shorts)) {
-    parsed = data;
+  const extractShortsFromObject = (obj: any): any[] => {
+    if (!obj || typeof obj !== "object") return [];
+    if (Array.isArray(obj)) return obj;
+    if (Array.isArray(obj.shorts)) return obj.shorts;
+    if (Array.isArray(obj.concepts)) return obj.concepts;
+    if (Array.isArray(obj.variants)) return obj.variants;
+    if (Array.isArray(obj.clips)) return obj.clips;
+    if (obj.trimmed_text) return [obj];
+    return [];
+  };
+
+  rawShorts = extractShortsFromObject(data);
+  if (rawShorts.length > 0) {
     rawText = JSON.stringify(data);
   } else {
     const candidate = data?.candidates?.[0];
@@ -178,20 +180,26 @@ export const requestMultiShortFleet = async (
       ? data.text.trim()
       : candidate?.output_text?.trim?.() ?? (typeof data === "string" ? data : "");
 
-    if (!aggregatedText) {
-      throw new Error("Multi-short response did not include any text output.");
-    }
-
-    rawText = aggregatedText;
-    try {
-      parsed = JSON.parse(aggregatedText);
-    } catch (error) {
-      console.error("Multi-short raw response", aggregatedText);
-      throw new Error("Multi-short response was not valid JSON.");
+    if (aggregatedText) {
+      rawText = aggregatedText;
+      try {
+        const parsed = JSON.parse(aggregatedText);
+        rawShorts = extractShortsFromObject(parsed);
+      } catch {
+        const match = aggregatedText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[0]);
+            rawShorts = extractShortsFromObject(parsed);
+          } catch {}
+        }
+      }
     }
   }
 
-  const rawShorts = Array.isArray(parsed?.shorts) ? parsed.shorts : [];
+  if (rawShorts.length === 0) {
+    throw new Error("Multi-short response did not contain any valid short clip candidates.");
+  }
   const processedShorts: import("./multiShortTypes").ShortClipCandidate[] = [];
 
   rawShorts.forEach((item, idx) => {
