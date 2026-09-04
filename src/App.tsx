@@ -7692,6 +7692,20 @@ export default function App() {
           onExportClip={handleExportSingleShort}
           onExportAll={handleExportAllShorts}
           isExporting={isExporting}
+          activeColorGrade={activeColorGrade}
+          isAutoGrading={isAutoColorGradeEnabled}
+          colorGradeSettings={colorGradeSettings}
+          onSelectColorGrade={handleSelectColorGrade}
+          onToggleAutoGrade={handleToggleAutoGrade}
+          onUpdateColorGradeSettings={handleUpdateColorGradeSettings}
+          activeCaptionStyle={activeCaptionStyle}
+          onSelectCaptionStyle={handleSelectCaptionStyle}
+          exportResolution={exportResolution}
+          onToggleExportResolution={() =>
+            setExportResolution((prev) => (prev === "1080p" ? "4k" : "1080p"))
+          }
+          exportEngine={exportEngine}
+          onChangeExportEngine={setExportEngine}
         />
         <ExportProgressModal
           isOpen={isExportModalOpen}
