@@ -1,0 +1,9 @@
+node_modules
+venv
+.next
+.git
+.gitignore
+*.log
+Dockerfile*
+docker-compose.yml
+test_audio.wav

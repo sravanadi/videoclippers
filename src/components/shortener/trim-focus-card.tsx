@@ -47,6 +47,12 @@ const OPTIONS: {
     description:
       "Capture all key talking points and the essence of the video. Length can run a few minutes.",
   },
+  {
+    value: "multi_short",
+    title: "✂️ Multi-Short Fleet",
+    description:
+      "Automatically discover 3 to 6 standalone viral short clips for TikTok / Reels.",
+  },
 ];
 
 const TrimFocusCard = ({

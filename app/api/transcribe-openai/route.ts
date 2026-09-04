@@ -11,11 +11,38 @@ const supportsWordTimestamps = (modelId: string) =>
 
 export async function POST(req: Request) {
   try {
-    // Get API key from server-side env var (no NEXT_PUBLIC_ prefix)
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
+      // Fallback to Local Whisper endpoint
+      const localUrl = process.env.LOCAL_WHISPER_URL?.replace(/\/$/, "") || "http://localhost:8000";
+      const formData = await req.formData();
+      const audioFile = formData.get("audio") as File;
+      if (!audioFile) {
+        return NextResponse.json({ error: "Missing audio file" }, { status: 400 });
+      }
+      const localFormData = new FormData();
+      localFormData.append("file", audioFile);
+      localFormData.append("response_format", "json");
+
+      try {
+        const localRes = await fetch(`${localUrl}/transcribe`, {
+          method: "POST",
+          body: localFormData,
+          signal: AbortSignal.timeout(600000),
+        });
+        if (localRes.ok) {
+          const data = await localRes.json();
+          return NextResponse.json(data);
+        }
+      } catch (err) {
+        // Local server fallback failed
+      }
+
       return NextResponse.json(
-        { error: "Missing OPENAI_API_KEY environment variable" },
+        {
+          error: "Missing OPENAI_API_KEY environment variable and Local Whisper server is not reachable.",
+          detail: "Please start the local Whisper server via 'bash scripts/start_whisper_server.sh' or set OPENAI_API_KEY in .env.local",
+        },
         { status: 500 }
       );
     }

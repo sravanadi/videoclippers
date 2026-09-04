@@ -8,6 +8,7 @@ import {
   BlobSource,
   BufferTarget,
   Mp3OutputFormat,
+  Mp4OutputFormat,
   ALL_FORMATS,
 } from "mediabunny";
 import { registerMp3Encoder } from "@mediabunny/mp3-encoder";
@@ -26,7 +27,10 @@ import type {
 } from "@/lib/transcript";
 import { transcribeWithElevenLabs } from "@/features/shortener/elevenLabs";
 import { transcribeWithOpenAI } from "@/features/shortener/openAi";
-import { requestGeminiRefinement } from "@/features/shortener/gemini";
+import { transcribeWithLocalWhisper } from "@/features/shortener/localWhisper";
+import { requestGeminiRefinement, requestMultiShortFleet } from "@/features/shortener/gemini";
+import type { ShortClipCandidate } from "@/features/shortener/multiShortTypes";
+import { MultiShortDrawer } from "@/components/MultiShortDrawer";
 import { buildKeepRangesFromWords } from "@/features/shortener/keepRanges";
 import { useShortenerWorkflow } from "@/features/shortener/use-shortener-workflow";
 import type {
@@ -237,6 +241,10 @@ export default function App() {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [multiShorts, setMultiShorts] = useState<ShortClipCandidate[]>([]);
+  const [activeShortClipId, setActiveShortClipId] = useState<string | null>(null);
+  const [isMultiShortDrawerOpen, setIsMultiShortDrawerOpen] = useState(false);
+  const [isGeneratingFleet, setIsGeneratingFleet] = useState(false);
   const [isFaceDebugLoading, setIsFaceDebugLoading] = useState(false);
   const [debugExportMetrics, setDebugExportMetrics] = useState<string | null>(
     null
@@ -399,7 +407,7 @@ export default function App() {
 
     if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
       const existingChildren = engine.block.getChildren(videoTrackRef.current) ?? [];
-      existingChildren.forEach((child) => {
+      existingChildren.forEach((child: number) => {
         if (engine.block.isValid(child)) {
           engine.block.destroy(child);
         }
@@ -589,7 +597,7 @@ export default function App() {
 
     if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
       const children = engine.block.getChildren(videoTrackRef.current) ?? [];
-      children.forEach((child) => applyLayout(child));
+      children.forEach((child: number) => applyLayout(child));
     } else if (videoBlockRef.current) {
       applyLayout(videoBlockRef.current);
     }
@@ -644,15 +652,84 @@ export default function App() {
     }
   };
 
+  const grabFrameFromVideoFile = (file: File, atSeconds: number): Promise<Blob> =>
+    new Promise<Blob>((resolve, reject) => {
+      let url = "";
+      try {
+        url = URL.createObjectURL(file);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+
+      const cleanup = () => {
+        if (url) URL.revokeObjectURL(url);
+        video.onloadeddata = null;
+        video.onseeked = null;
+        video.onerror = null;
+        video.remove();
+      };
+
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("HTML video frame grab timed out"));
+      }, 5000);
+
+      video.onloadeddata = () => {
+        const duration = Number.isFinite(video.duration) ? video.duration : atSeconds;
+        video.currentTime = Math.max(0, Math.min(atSeconds, duration));
+      };
+
+      video.onseeked = () => {
+        window.clearTimeout(timeoutId);
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = video.videoWidth || 640;
+          canvas.height = video.videoHeight || 360;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((blob) => {
+              cleanup();
+              if (blob) resolve(blob);
+              else reject(new Error("Canvas toBlob failed"));
+            }, "image/jpeg", 0.85);
+          } else {
+            cleanup();
+            reject(new Error("Canvas 2D context unavailable"));
+          }
+        } catch (err) {
+          cleanup();
+          reject(err);
+        }
+      };
+
+      video.onerror = (err) => {
+        window.clearTimeout(timeoutId);
+        cleanup();
+        reject(err || new Error("Video element error"));
+      };
+
+      video.src = url;
+    });
+
   const grabFrame = (
     engine: CreativeEngineInstance,
     blockId: number,
     atSeconds: number,
     thumbH = FACE_THUMBNAIL_HEIGHT
   ) =>
-    new Promise<ImageData>((resolve, reject) => {
+    new Promise<Blob>((resolve, reject) => {
       const safeTime = Number.isFinite(atSeconds) ? Math.max(0, atSeconds) : 0;
       if (!engine.block.isValid(blockId)) {
+        if (videoFile) {
+          grabFrameFromVideoFile(videoFile, safeTime).then(resolve).catch(reject);
+          return;
+        }
         reject(new Error("Block is not valid"));
         return;
       }
@@ -664,10 +741,21 @@ export default function App() {
         if (timeoutId) window.clearTimeout(timeoutId);
         fn();
       };
+
+      const fallbackToVideoFile = (primaryError: unknown) => {
+        if (videoFile) {
+          grabFrameFromVideoFile(videoFile, safeTime)
+            .then(resolve)
+            .catch(() => reject(primaryError));
+        } else {
+          reject(primaryError);
+        }
+      };
+
       const timeoutId = window.setTimeout(() => {
         cancel?.();
         finalize(() =>
-          reject(new Error("Timed out while sampling video frame."))
+          fallbackToVideoFile(new Error("Timed out while sampling video frame."))
         );
       }, FACE_THUMBNAIL_TIMEOUT_MS);
       try {
@@ -677,31 +765,56 @@ export default function App() {
           safeTime,
           safeTime,
           1,
-          (_index, result) => {
+          (_index: number, result: Blob | Error) => {
             cancel?.();
             if (result instanceof Error) {
-              finalize(() => reject(result));
+              finalize(() => fallbackToVideoFile(result));
             } else {
               finalize(() => resolve(result));
             }
           }
         );
       } catch (error) {
-        finalize(() =>
-          reject(
-            error instanceof Error
-              ? error
-              : new Error("Failed to sample video frame.")
-          )
-        );
+        finalize(() => fallbackToVideoFile(error));
       }
     });
 
   const detectFacesInFrame = async (
     faceapi: FaceApiModule,
-    img: ImageData
+    img: ImageData | Blob | HTMLImageElement
   ): Promise<FaceBounds[]> => {
-    const canvas = imageDataToCanvas(img);
+    let inputTarget: HTMLCanvasElement | HTMLImageElement;
+    let width = 0;
+    let height = 0;
+
+    if (img instanceof Blob) {
+      const htmlImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        const url = URL.createObjectURL(img);
+        image.onload = () => {
+          URL.revokeObjectURL(url);
+          resolve(image);
+        };
+        image.onerror = (err) => {
+          URL.revokeObjectURL(url);
+          reject(err);
+        };
+        image.src = url;
+      });
+      inputTarget = htmlImg;
+      width = htmlImg.naturalWidth || htmlImg.width;
+      height = htmlImg.naturalHeight || htmlImg.height;
+    } else if (img instanceof HTMLImageElement) {
+      inputTarget = img;
+      width = img.naturalWidth || img.width;
+      height = img.naturalHeight || img.height;
+    } else {
+      const canvas = imageDataToCanvas(img);
+      inputTarget = canvas;
+      width = canvas.width;
+      height = canvas.height;
+    }
+
     let detections: FaceDetectionResult[] = [];
     let scopeStarted = false;
     try {
@@ -710,7 +823,7 @@ export default function App() {
         scopeStarted = true;
       }
       detections = (await faceapi.detectAllFaces(
-        canvas,
+        inputTarget,
         new faceapi.TinyFaceDetectorOptions()
       )) as FaceDetectionResult[];
     } catch (error) {
@@ -725,7 +838,7 @@ export default function App() {
         }
       }
     }
-    return parseFaceDetections(detections, canvas.width, canvas.height);
+    return parseFaceDetections(detections, width, height);
   };
 
   const applyRoundedCorners = (
@@ -1682,7 +1795,7 @@ export default function App() {
     }
     if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
       const children = engine.block.getChildren(videoTrackRef.current) ?? [];
-      const candidate = children.find((child) => engine.block.isValid(child));
+      const candidate = children.find((child: number) => engine.block.isValid(child));
       if (candidate) return candidate;
     }
     return null;
@@ -1793,9 +1906,13 @@ export default function App() {
         }
         let faces: FaceBounds[] = [];
         for (const sampleTime of samples) {
-          const frame = await grabFrame(engine, clipId, sampleTime);
-          faces = await detectFacesInFrame(faceapi, frame);
-          if (faces.length) break;
+          try {
+            const frame = await grabFrame(engine, clipId, sampleTime);
+            faces = await detectFacesInFrame(faceapi, frame);
+            if (faces.length) break;
+          } catch (sampleError) {
+            console.warn("[FaceCrop] Frame grab sample failed for clip", clipId, sampleTime, sampleError);
+          }
         }
         faceCenterCacheRef.current.set(clipId, faces);
         return faces;
@@ -3352,7 +3469,7 @@ export default function App() {
     }
     if (videoTrackRef.current && engine.block.isValid(videoTrackRef.current)) {
       const existingChildren = engine.block.getChildren(videoTrackRef.current) ?? [];
-      existingChildren.forEach((child) => {
+      existingChildren.forEach((child: number) => {
         if (engine.block.isValid(child)) {
           engine.block.destroy(child);
         }
@@ -3360,40 +3477,66 @@ export default function App() {
       videoTrackRef.current = null;
     }
 
-    const blobUrl = URL.createObjectURL(file);
-    const opfs = await navigator.storage.estimate();
-    const directory = await navigator.storage.getDirectory();
-    // Sanitize filename to prevent path traversal and dangerous characters
-    const sanitizedFileName = file.name
-      .replace(/[<>:"|?*\x00-\x1F]/g, '') // Remove dangerous characters
-      .replace(/\.\./g, '') // Remove path traversal attempts
-      .replace(/^\.+/, '') // Remove leading dots
-      .replace(/\s+/g, '_') // Replace spaces with underscores
-      .substring(0, 255) // Limit filename length
-      || 'video.mp4'; // Fallback if name becomes empty
+    let targetUploadFile = file;
+    try {
+      if (file && file.size > 0) {
+        console.log("[Remux] Checking MP4 container structure for:", file.name);
+        const input = new Input({
+          source: new BlobSource(file),
+          formats: ALL_FORMATS,
+        });
+        const target = new BufferTarget();
+        const output = new Output({
+          format: new Mp4OutputFormat(),
+          target,
+        });
+        const conversion = await Conversion.init({
+          input,
+          output,
+        });
+        await conversion.execute();
+        if (target.buffer && target.buffer.byteLength > 0) {
+          console.log("[Remux] MP4 remuxed to standard ISOBMFF. Remuxed size:", target.buffer.byteLength);
+          const sanitizedRemuxName = file.name.replace(/\.[^/.]+$/, "") + "_clean.mp4";
+          targetUploadFile = new File([target.buffer], sanitizedRemuxName, { type: "video/mp4" });
+        }
+      }
+    } catch (remuxErr) {
+      console.warn("[Remux] Fast remux pass bypassed, using uploaded file:", remuxErr);
+    }
 
-    // Remove existing file if it exists to avoid lock conflicts
+    const blobUrl = URL.createObjectURL(targetUploadFile);
+    const directory = await navigator.storage.getDirectory();
+    const sanitizedFileName = targetUploadFile.name
+      .replace(/[<>:"|?*\x00-\x1F]/g, '')
+      .replace(/\.\./g, '')
+      .replace(/^\.+/, '')
+      .replace(/\s+/g, '_')
+      .substring(0, 255)
+      || 'video.mp4';
+
     try {
       await directory.removeEntry(sanitizedFileName);
     } catch (e) {
-      // File doesn't exist, which is fine
+      // File doesn't exist
     }
 
     const opfsFile = await directory.getFileHandle(sanitizedFileName, { create: true });
     const stream = await opfsFile.createWritable();
-
-    // Write file as ArrayBuffer to ensure complete data transfer
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await targetUploadFile.arrayBuffer();
     await stream.write(arrayBuffer);
     await stream.close();
 
-    // Small delay to ensure OPFS has fully persisted the file
     await new Promise(resolve => setTimeout(resolve, 150));
-
     const videoURL = "opfs://" + sanitizedFileName;
 
-
-    const videoBlockId = await engine.block.addVideo(videoURL, 1920, 1080);
+    let videoBlockId: number;
+    try {
+      videoBlockId = await engine.block.addVideo(videoURL, 1920, 1080);
+    } catch (addError) {
+      console.warn("[VideoEngine] OPFS URL load failed, falling back to Blob URL", addError);
+      videoBlockId = await engine.block.addVideo(blobUrl, 1920, 1080);
+    }
 
     setIsExtracting(false);
 
@@ -4152,7 +4295,7 @@ export default function App() {
         best = { id, count };
       }
     });
-    return best?.id ?? null;
+    return (best as { id: string; count: number } | null)?.id ?? null;
   };
 
   const splitRangesBySpeaker = (
@@ -4206,6 +4349,16 @@ export default function App() {
   ): Promise<TranscriptWord[]> => {
     try {
       setIsTranscribing(true);
+      if (speechProvider === "local") {
+        const transcriptionResult = await transcribeWithLocalWhisper(audioBlob);
+        setTranscriptDebug(transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse);
+        const words = extractOpenAITranscriptWords(
+          transcriptionResult.rawResponse as unknown as OpenAITranscriptResponse
+        );
+        setCurrentTranscriptWords(words);
+        setAnalysisEstimate(buildAnalysisEstimate(words));
+        return words;
+      }
       if (speechProvider === "openai-whisper") {
         const transcriptionResult = await transcribeWithOpenAI(audioBlob, {
           enableWordTimestamps: true,
@@ -4251,12 +4404,24 @@ export default function App() {
         setAnalysisEstimate(buildAnalysisEstimate(words));
         return words;
       }
-      const transcriptionResult = await transcribeWithElevenLabs(audioBlob);
-      setTranscriptDebug(transcriptionResult.rawResponse);
-      const words = extractTranscriptWords(transcriptionResult.rawResponse);
-      setCurrentTranscriptWords(words);
-      setAnalysisEstimate(buildAnalysisEstimate(words));
-      return words;
+      try {
+        const transcriptionResult = await transcribeWithElevenLabs(audioBlob);
+        setTranscriptDebug(transcriptionResult.rawResponse);
+        const words = extractTranscriptWords(transcriptionResult.rawResponse);
+        setCurrentTranscriptWords(words);
+        setAnalysisEstimate(buildAnalysisEstimate(words));
+        return words;
+      } catch (elevenLabsErr) {
+        console.warn("ElevenLabs transcription failed, falling back to Local Whisper", elevenLabsErr);
+        const localResult = await transcribeWithLocalWhisper(audioBlob);
+        setTranscriptDebug(localResult.rawResponse as unknown as OpenAITranscriptResponse);
+        const words = extractOpenAITranscriptWords(
+          localResult.rawResponse as unknown as OpenAITranscriptResponse
+        );
+        setCurrentTranscriptWords(words);
+        setAnalysisEstimate(buildAnalysisEstimate(words));
+        return words;
+      }
     } catch (error) {
       console.error("Failed to transcribe audio", error);
       const message =
@@ -4409,7 +4574,7 @@ export default function App() {
       const primarySlots =
         (resolvedPrimarySpeakerId && resolvedSlots[resolvedPrimarySpeakerId]) ??
         [];
-      setPrimaryFaceSlots(primarySlots);
+      setPrimaryFaceSlots(Array.isArray(primarySlots) ? primarySlots : []);
       const optionFaces = resolvedPrimarySpeakerId
         ? resolvedThumbnails
             .filter((thumb) => thumb.speakerId === resolvedPrimarySpeakerId)
@@ -4563,7 +4728,7 @@ export default function App() {
     setSpeakerAssignedThumbnails({});
     const primarySlots =
       (primarySpeakerId && faceSlotsBySpeaker[primarySpeakerId]) ?? [];
-    setPrimaryFaceSlots(primarySlots);
+    setPrimaryFaceSlots(Array.isArray(primarySlots) ? primarySlots : []);
     const optionFaces = primarySpeakerId
       ? thumbnails
           .filter((thumb) => thumb.speakerId === primarySpeakerId)
@@ -4768,6 +4933,25 @@ export default function App() {
 
       activeStep = "analysis";
       updateProcessingStatus("analysis", "active");
+
+      if (refinementMode === "multi_short") {
+        const { shorts, rawText } = await requestMultiShortFleet(words);
+        setGeminiDebug(rawText);
+        setMultiShorts(shorts);
+        if (shorts.length > 0) {
+          const firstShort = shorts[0];
+          setActiveShortClipId(firstShort.id);
+          setIsMultiShortDrawerOpen(true);
+          setTargetAspectRatioId("9:16");
+          updateProcessingStatus("analysis", "complete");
+          updateProcessingStatus("preload", "complete");
+          beginWorkflow();
+          setAutoProcessing(false);
+          setAutoProcessingError(null);
+          applyTranscriptCuts(words, firstShort.words, firstShort.hook);
+        }
+        return;
+      }
       const desiredVariants =
         refinementMode === "sixty_seconds" ||
         refinementMode === "thirty_seconds"
@@ -4907,11 +5091,12 @@ export default function App() {
           (preloadResult.primarySpeakerId &&
             preloadResult.faceSlotsBySpeaker[preloadResult.primarySpeakerId]) ??
           [];
-        setPrimaryFaceSlots(primarySlots);
-        const optionFaces = preloadResult.primarySpeakerId
+        setPrimaryFaceSlots(Array.isArray(primarySlots) ? primarySlots : []);
+        const primarySpeakerId = preloadResult?.primarySpeakerId;
+        const optionFaces = primarySpeakerId && preloadResult
           ? preloadResult.thumbnails
               .filter(
-                (thumb) => thumb.speakerId === preloadResult.primarySpeakerId
+                (thumb) => thumb.speakerId === primarySpeakerId
               )
               .sort((a, b) => a.slotIndex - b.slotIndex)
           : [];
@@ -5578,7 +5763,7 @@ export default function App() {
       return;
     }
     const entries = runtimeEngine.block.getChildren(trackId) ?? [];
-    entries.forEach((entry) => {
+    entries.forEach((entry: number) => {
       if (runtimeEngine.block.isValid(entry)) {
         runtimeEngine.block.destroy(entry);
       }
@@ -6021,7 +6206,7 @@ export default function App() {
     });
 
     const existingChildren = engine.block.getChildren(trackId) ?? [];
-    existingChildren.forEach((child) => {
+    existingChildren.forEach((child: number) => {
       if (engine.block.isValid(child)) {
         engine.block.destroy(child);
       }
@@ -6202,6 +6387,57 @@ export default function App() {
       );
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const handleGenerateShortsFleet = async () => {
+    const words = currentTranscriptWords;
+    if (!words.length) {
+      alert("Please upload and transcribe a video first.");
+      return;
+    }
+    setIsGeneratingFleet(true);
+    try {
+      const { shorts, rawText } = await requestMultiShortFleet(words);
+      setGeminiDebug(rawText);
+      setMultiShorts(shorts);
+      if (shorts.length > 0) {
+        const firstShort = shorts[0];
+        setActiveShortClipId(firstShort.id);
+        setIsMultiShortDrawerOpen(true);
+        setTargetAspectRatioId("9:16");
+        beginWorkflow();
+        setAutoProcessing(false);
+        setAutoProcessingError(null);
+        applyTranscriptCuts(words, firstShort.words, firstShort.hook);
+      } else {
+        alert("No short clip candidates were extracted.");
+      }
+    } catch (error) {
+      console.error("Failed to generate shorts fleet:", error);
+      alert(error instanceof Error ? error.message : "Failed to generate shorts fleet.");
+    } finally {
+      setIsGeneratingFleet(false);
+    }
+  };
+
+  const handleSelectShortClip = (short: ShortClipCandidate) => {
+    const words = currentTranscriptWords;
+    setActiveShortClipId(short.id);
+    setTargetAspectRatioId("9:16");
+    applyTranscriptCuts(words, short.words, short.hook);
+  };
+
+  const handleExportSingleShort = async (short: ShortClipCandidate) => {
+    handleSelectShortClip(short);
+    await handleExport();
+  };
+
+  const handleExportAllShorts = async () => {
+    if (!multiShorts.length) return;
+    for (const short of multiShorts) {
+      handleSelectShortClip(short);
+      await handleExport();
     }
   };
 
@@ -6485,7 +6721,7 @@ export default function App() {
     if (!engine || !pageId) return;
 
     const zoomToPage = () => {
-      engine.scene.zoomToBlock(pageId, { padding: 0 }).catch((error) => {
+      engine.scene.zoomToBlock(pageId, { padding: 0 }).catch((error: unknown) => {
         console.warn("Failed to zoom after result layout", error);
       });
     };
@@ -6589,7 +6825,11 @@ export default function App() {
   return (
     <ThemeProvider>
       <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader onLogoClick={handleRemoveVideo} />
+        <AppHeader
+          onLogoClick={handleRemoveVideo}
+          onOpenShortsFleet={() => setIsMultiShortDrawerOpen((prev) => !prev)}
+          shortsCount={multiShorts.length}
+        />
 
         <main className="flex-1">
           <div className="container py-10">
@@ -6629,7 +6869,7 @@ export default function App() {
                       onStart={runAutomaticWorkflow}
                       aspectRatioId={targetAspectRatioId}
                       onAspectRatioChange={handleAspectRatioChange}
-                      showAspectRatio={showTrimStage}
+                      showAspectRatio={Boolean(showTrimStage)}
                       showOptions={!showUploadStage}
                       showAction={!showUploadStage}
                       layout={showUploadStage ? "full" : "split"}
@@ -6643,7 +6883,7 @@ export default function App() {
                           }
                           enableUpload={showUploadStage}
                           showControls={false}
-                          showPlaybackControls={showTrimStage}
+                          showPlaybackControls={Boolean(showTrimStage)}
                           engineCanvasContainerRef={
                             showInlinePreview
                               ? engineCanvasContainerRef
@@ -7014,6 +7254,16 @@ export default function App() {
           editorContainerRef={editorContainerRef}
           isLoading={isEditorLoading}
           error={editorError}
+        />
+        <MultiShortDrawer
+          isOpen={isMultiShortDrawerOpen}
+          onClose={() => setIsMultiShortDrawerOpen(false)}
+          shorts={multiShorts}
+          activeClipId={activeShortClipId}
+          onSelectClip={handleSelectShortClip}
+          onExportClip={handleExportSingleShort}
+          onExportAll={handleExportAllShorts}
+          isExporting={isExporting}
         />
         <DebugModal
           isOpen={isDebugOpen}

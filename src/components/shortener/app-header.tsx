@@ -1,12 +1,15 @@
 import Link from "next/link";
-import { Sparkles } from "lucide-react";
+import { Sparkles, Scissors } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { Button } from "@/components/ui/button";
 
 type AppHeaderProps = {
   onLogoClick?: () => void;
+  onOpenShortsFleet?: () => void;
+  shortsCount?: number;
 };
 
-const AppHeader = ({ onLogoClick }: AppHeaderProps) => (
+const AppHeader = ({ onLogoClick, onOpenShortsFleet, shortsCount }: AppHeaderProps) => (
   <header className="border-b">
     <div className="container flex h-16 items-center justify-between gap-4">
       <Link
@@ -29,7 +32,20 @@ const AppHeader = ({ onLogoClick }: AppHeaderProps) => (
         <Sparkles className="h-5 w-5 text-primary" />
         VideoClipper
       </Link>
-      <ThemeToggle />
+      <div className="flex items-center gap-3">
+        {Boolean(shortsCount && shortsCount > 0) && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={onOpenShortsFleet}
+            className="bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-xs shadow-md shadow-indigo-500/20 flex items-center gap-1.5"
+          >
+            <Scissors className="h-3.5 w-3.5" />
+            Shorts Fleet ({shortsCount})
+          </Button>
+        )}
+        <ThemeToggle />
+      </div>
     </div>
   </header>
 );

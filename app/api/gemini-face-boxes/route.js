@@ -4,11 +4,15 @@ export const runtime = "nodejs";
 
 const DEFAULT_GOOGLE_MODEL = "models/gemini-1.5-flash";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-2.0-flash-exp";
+const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-11b-vision-instruct";
 const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION?.trim() || "v1";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const OPENROUTER_BASE_URL =
   process.env.OPENROUTER_BASE_URL?.replace(/\/$/, "") ||
   "https://openrouter.ai/api/v1";
+const NVIDIA_BASE_URL =
+  process.env.NVIDIA_BASE_URL?.replace(/\/$/, "") ||
+  "https://integrate.api.nvidia.com/v1";
 const OPENROUTER_SITE_URL =
   process.env.OPENROUTER_SITE_URL ||
   process.env.NEXT_PUBLIC_APP_URL ||
@@ -34,6 +38,7 @@ const readEnvProvider = () => {
     process.env.GEMINI_PROVIDER?.trim().toLowerCase() ||
     process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim().toLowerCase();
   if (explicit) return explicit;
+  if (process.env.NVIDIA_API_KEY) return "nvidia";
   const hasOpenRouterKey =
     !!(
       process.env.OPENROUTER_API_KEY ||
@@ -42,8 +47,11 @@ const readEnvProvider = () => {
   return hasOpenRouterKey ? "openrouter" : "google";
 };
 
-const normalizeProvider = (value) =>
-  value === "openrouter" ? "openrouter" : "google";
+const normalizeProvider = (value) => {
+  if (value === "nvidia") return "nvidia";
+  if (value === "openrouter") return "openrouter";
+  return "google";
+};
 
 const resolveProvider = (requestedProvider) => {
   const candidate =
@@ -55,6 +63,9 @@ const resolveProvider = (requestedProvider) => {
 
 const normalizeModelId = (value, provider) => {
   const trimmed = typeof value === "string" ? value.trim() : "";
+  if (provider === "nvidia") {
+    return trimmed || DEFAULT_NVIDIA_MODEL;
+  }
   if (provider === "openrouter") {
     return trimmed || DEFAULT_OPENROUTER_MODEL;
   }
@@ -140,7 +151,10 @@ export async function POST(req) {
     const body = await req.json();
     const provider = resolveProvider(body?.provider);
     const usingOpenRouter = provider === "openrouter";
-    const apiKey = usingOpenRouter
+    const usingNvidia = provider === "nvidia";
+    const apiKey = usingNvidia
+      ? process.env.NVIDIA_API_KEY || ""
+      : usingOpenRouter
       ? process.env.OPENROUTER_API_KEY ||
         process.env.GEMINI_API_KEY ||
         process.env.VITE_GEMINI_API_KEY ||
@@ -149,7 +163,9 @@ export async function POST(req) {
       : process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || "";
 
     if (!apiKey) {
-      const missingEnv = usingOpenRouter
+      const missingEnv = usingNvidia
+        ? "NVIDIA_API_KEY"
+        : usingOpenRouter
         ? "OPENROUTER_API_KEY (or GEMINI_API_KEY)"
         : "GEMINI_API_KEY";
       return NextResponse.json(
@@ -170,15 +186,17 @@ export async function POST(req) {
     const targetModel = normalizeModelId(body?.model, provider);
 
     let data;
-    if (usingOpenRouter) {
+    if (usingNvidia || usingOpenRouter) {
+      const baseUrl = usingNvidia ? NVIDIA_BASE_URL : OPENROUTER_BASE_URL;
       const openRouterAttempt = await generateWithOpenRouter({
         apiKey,
         targetModel,
         imageDataUrl,
+        baseUrl,
       });
       if (!openRouterAttempt.ok) {
         return NextResponse.json(
-          { error: "Gemini API error", detail: openRouterAttempt.detail },
+          { error: `${usingNvidia ? "NVIDIA" : "Gemini"} API error`, detail: openRouterAttempt.detail },
           { status: openRouterAttempt.status }
         );
       }
@@ -198,7 +216,7 @@ export async function POST(req) {
       data = geminiAttempt.data;
     }
 
-    const rawText = usingOpenRouter
+    const rawText = (usingNvidia || usingOpenRouter)
       ? extractStructuredAssistantText(data)
       : extractGeminiResponseText(data);
     const parsed = tryParseJson(rawText);
@@ -262,7 +280,7 @@ async function generateWithGemini({ apiKey, targetModel, image }) {
   };
 }
 
-async function generateWithOpenRouter({ apiKey, targetModel, imageDataUrl }) {
+async function generateWithOpenRouter({ apiKey, targetModel, imageDataUrl, baseUrl = OPENROUTER_BASE_URL }) {
   const payload = {
     model: targetModel,
     messages: [
@@ -279,14 +297,18 @@ async function generateWithOpenRouter({ apiKey, targetModel, imageDataUrl }) {
     response_format: { type: "json_object" },
   };
 
-  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (baseUrl.includes("openrouter.ai")) {
+    headers["HTTP-Referer"] = OPENROUTER_SITE_URL;
+    headers["X-Title"] = OPENROUTER_APP_TITLE;
+  }
+
+  const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": OPENROUTER_SITE_URL,
-      "X-Title": OPENROUTER_APP_TITLE,
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 

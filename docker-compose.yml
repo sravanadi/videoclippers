@@ -1,0 +1,32 @@
+services:
+  whisper-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    container_name: videoclipper-whisper
+    ports:
+      - "8000:8000"
+    environment:
+      - WHISPER_MODEL=base
+      - PORT=8000
+      - HOST=0.0.0.0
+    volumes:
+      - whisper_hf_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: videoclipper-app
+    ports:
+      - "3000:3000"
+    environment:
+      - LOCAL_WHISPER_URL=http://whisper-server:8000
+      - NVIDIA_API_KEY=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
+    depends_on:
+      - whisper-server
+    restart: unless-stopped
+
+volumes:
+  whisper_hf_cache:

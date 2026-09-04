@@ -48,6 +48,22 @@ Provide between 2 and ${maxVariants} DISTINCT concepts. Each concept must:
 
 Do not include explanations outside the JSON.`;
 
+export const MULTI_SHORT_RESPONSE_SCHEMA = `Return STRICT JSON matching this schema:
+{
+  "shorts": [{
+    "id": string (unique slug, e.g. "short_1"),
+    "title": string (3-6 words describing the standalone topic),
+    "hook": string (6-12 words punchy social media hook for Reels/TikTok),
+    "viral_score": number (estimated engagement rating between 75 and 99),
+    "trimmed_text": string (the edited standalone transcript using only words from TRANSCRIPT_TEXT for this specific clip section),
+    "estimated_duration_seconds": number (target runtime between 15 and 60 seconds),
+    "notes": string optional
+  }]
+}
+
+Extract 3 to 6 distinct, self-contained short video candidates from different parts of TRANSCRIPT_TEXT. Each short must have an independent, complete narrative arc that makes sense on its own.
+Do not include explanations outside the JSON.`;
+
 export const SHORTENING_MODE_INSTRUCTIONS = {
   disfluency:
     "Focus exclusively on cleaning up vocal disfluencies, hesitations, and filler phrases. Keep every substantive sentence unless it is entirely filler. The final runtime should closely match the original aside from the removed filler tokens.",
@@ -59,4 +75,6 @@ export const SHORTENING_MODE_INSTRUCTIONS = {
     "Create a summary edit that captures all important talking points and the essence of the video. The runtime can be longer (often a few minutes) and should prioritize completeness over brevity. Remove disfluencies and low-value tangents while preserving a coherent narrative arc. Ensure each section begins with enough context for viewers to follow.",
   blooper:
     "Create a blooper/comedy reel by identifying and keeping the funniest, most awkward, or entertaining moments from the video. Focus on: bloopers and mistakes, funny conversations and banter, awkward moments and reactions, unexpected jokes or comedic timing, amusing tangents or derailments, and any genuinely humorous content. KEEP the natural imperfections, stammers, and verbal stumbles that make these moments funny - do NOT clean up disfluencies if they add to the comedic effect. Remove only the boring or serious segments between funny moments. The final runtime should prioritize humor and entertainment value over coherence. Target a punchy, energetic vibe that maximizes laughs.",
+  multi_short:
+    "Analyze the full transcript and extract 3 to 6 high-value, standalone short video clips suitable for vertical TikTok/Shorts/Reels. Each clip must cover a distinct topic or highlight moment from the source video, be 15-60 seconds long, begin with clear context, and be completely self-contained.",
 };

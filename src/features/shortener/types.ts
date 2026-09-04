@@ -13,7 +13,8 @@ export type RefinementMode =
   | "disfluency"
   | "thirty_seconds"
   | "sixty_seconds"
-  | "summary";
+  | "summary"
+  | "multi_short";
 export type SpeakerTemplateId =
   | "none"
   | "stacked"
@@ -29,7 +30,8 @@ export type SpeakerTemplateOption = {
 export type SpeechToTextProvider =
   | "elevenlabs"
   | "openai-whisper"
-  | "openai-gpt4o";
+  | "openai-gpt4o"
+  | "local";
 
 export type GeminiConceptRaw = {
   id?: string | null;
@@ -47,6 +49,7 @@ export type GeminiConceptRaw = {
 };
 
 export type GeminiRefinementPayload = {
+  trimmed_text?: string | null;
   hook?: string | null;
   trimmed_words?: TranscriptWord[];
   notes?: string | null;

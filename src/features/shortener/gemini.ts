@@ -6,6 +6,25 @@ import type {
   RefinementMode,
 } from "./types";
 
+const parseResponseError = async (
+  response: Response,
+  defaultMessage: string
+): Promise<string> => {
+  const text = await response.text();
+  if (!text) return defaultMessage;
+  try {
+    const json = JSON.parse(text);
+    const detail = json.detail || json.error;
+    if (typeof detail === "string") return detail;
+    if (typeof detail === "object" && detail !== null) {
+      return JSON.stringify(detail);
+    }
+    return text;
+  } catch {
+    return text;
+  }
+};
+
 export const requestGeminiRefinement = async (
   words: TranscriptWord[],
   shorteningMode: RefinementMode,
@@ -15,7 +34,9 @@ export const requestGeminiRefinement = async (
     process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim().toLowerCase() ||
     "openrouter";
   const defaultClientModel =
-    geminiProvider === "openrouter"
+    geminiProvider === "nvidia"
+      ? "meta/llama-3.2-11b-vision-instruct"
+      : geminiProvider === "openrouter"
       ? "google/gemini-2.0-flash-exp"
       : "models/gemini-2.5-flash-lite";
   const model =
@@ -45,40 +66,166 @@ export const requestGeminiRefinement = async (
   );
 
   if (!response.ok) {
-    const errorMessage = await response.text();
-    throw new Error(
-      errorMessage || "Gemini transcription refinement request failed."
+    const message = await parseResponseError(
+      response,
+      "Gemini transcription refinement request failed."
     );
+    throw new Error(message);
   }
 
   const fileUploadUsed =
     response.headers.get("x-gemini-file-upload") === "true";
 
   const data = await response.json();
-  const candidate = data?.candidates?.[0];
-  const aggregatedText = Array.isArray(candidate?.content?.parts)
-    ? candidate.content.parts
-        .map((part: { text?: string }) => part?.text ?? "")
-        .join("")
-        .trim()
-    : candidate?.output_text?.trim?.() ?? "";
 
-  if (!aggregatedText) {
-    throw new Error("Gemini response did not include any text output.");
-  }
+  let parsed: GeminiRefinement | null = null;
+  let rawText = "";
 
-  let parsed: GeminiRefinement;
-  try {
-    parsed = JSON.parse(aggregatedText);
-  } catch (error) {
-    console.error("Gemini raw response", aggregatedText);
-    throw new Error("Gemini response was not valid JSON.");
+  if (
+    data &&
+    typeof data === "object" &&
+    (data.trimmed_text || Array.isArray(data.variants))
+  ) {
+    parsed = data as GeminiRefinement;
+    rawText = JSON.stringify(data);
+  } else {
+    const candidate = data?.candidates?.[0];
+    const aggregatedText = Array.isArray(candidate?.content?.parts)
+      ? candidate.content.parts
+          .map((part: { text?: string }) => part?.text ?? "")
+          .join("")
+          .trim()
+      : typeof data?.text === "string"
+      ? data.text.trim()
+      : candidate?.output_text?.trim?.() ?? (typeof data === "string" ? data : "");
+
+    if (!aggregatedText) {
+      throw new Error("Gemini response did not include any text output.");
+    }
+
+    rawText = aggregatedText;
+    try {
+      parsed = JSON.parse(aggregatedText);
+    } catch (error) {
+      console.error("Gemini raw response", aggregatedText);
+      throw new Error("Gemini response was not valid JSON.");
+    }
   }
 
   return {
     // Pass source words so normalize can convert trimmed_text to trimmed_words
-    refinement: normalizeGeminiRefinement(parsed, words),
+    refinement: normalizeGeminiRefinement(parsed!, words),
     fileUploadUsed,
-    rawText: aggregatedText,
+    rawText,
+  };
+};
+
+export const requestMultiShortFleet = async (
+  words: TranscriptWord[]
+): Promise<{ shorts: import("./multiShortTypes").ShortClipCandidate[]; rawText: string }> => {
+  const geminiProvider =
+    process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim() || "google";
+  const defaultClientModel =
+    geminiProvider === "openrouter"
+      ? "google/gemini-2.0-flash-exp"
+      : "models/gemini-2.5-flash-lite";
+  const model =
+    process.env.NEXT_PUBLIC_GEMINI_MODEL?.trim() || defaultClientModel;
+
+  const proxyBase =
+    process.env.NEXT_PUBLIC_GEMINI_PROXY_URL?.replace(/\/$/, "") ?? "";
+  const payload = {
+    model,
+    words,
+    shorteningMode: "multi_short",
+    provider: geminiProvider,
+  };
+
+  const response = await fetch(
+    `${proxyBase ? proxyBase : ""}/api/gemini-refine`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!response.ok) {
+    const message = await parseResponseError(
+      response,
+      "Multi-short extraction request failed."
+    );
+    throw new Error(message);
+  }
+
+  const data = await response.json();
+  let parsed: { shorts?: import("./multiShortTypes").RawShortCandidate[] } | null = null;
+  let rawText = "";
+
+  if (data && typeof data === "object" && Array.isArray(data.shorts)) {
+    parsed = data;
+    rawText = JSON.stringify(data);
+  } else {
+    const candidate = data?.candidates?.[0];
+    const aggregatedText = Array.isArray(candidate?.content?.parts)
+      ? candidate.content.parts
+          .map((part: { text?: string }) => part?.text ?? "")
+          .join("")
+          .trim()
+      : typeof data?.text === "string"
+      ? data.text.trim()
+      : candidate?.output_text?.trim?.() ?? (typeof data === "string" ? data : "");
+
+    if (!aggregatedText) {
+      throw new Error("Multi-short response did not include any text output.");
+    }
+
+    rawText = aggregatedText;
+    try {
+      parsed = JSON.parse(aggregatedText);
+    } catch (error) {
+      console.error("Multi-short raw response", aggregatedText);
+      throw new Error("Multi-short response was not valid JSON.");
+    }
+  }
+
+  const rawShorts = Array.isArray(parsed?.shorts) ? parsed.shorts : [];
+  const processedShorts: import("./multiShortTypes").ShortClipCandidate[] = [];
+
+  rawShorts.forEach((item, idx) => {
+    if (!item?.trimmed_text) return;
+    const normalized = normalizeGeminiRefinement(
+      {
+        trimmed_text: item.trimmed_text,
+        hook: item.hook,
+        notes: item.notes,
+        estimated_duration_seconds: item.estimated_duration_seconds,
+      },
+      words
+    );
+
+    const clipWords = normalized.trimmed_words || [];
+    const startTime = clipWords.length > 0 ? clipWords[0].start : 0;
+    const endTime = clipWords.length > 0 ? clipWords[clipWords.length - 1].end : 0;
+    const durationSeconds = Math.max(1, Math.round(endTime - startTime));
+
+    processedShorts.push({
+      id: item.id || `short_${idx + 1}`,
+      title: item.title || `Short Clip #${idx + 1}`,
+      hook: item.hook || normalized.hook || `Viral Moment #${idx + 1}`,
+      viralScore: item.viral_score || Math.floor(82 + Math.random() * 16),
+      startTime,
+      endTime,
+      words: clipWords,
+      durationSeconds,
+      notes: item.notes,
+    });
+  });
+
+  return {
+    shorts: processedShorts,
+    rawText: rawText,
   };
 };

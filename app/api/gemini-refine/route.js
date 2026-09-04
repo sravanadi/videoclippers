@@ -3,45 +3,25 @@ import {
   BASE_INSTRUCTIONS,
   SINGLE_RESPONSE_SCHEMA,
   buildMultiConceptSchema,
+  MULTI_SHORT_RESPONSE_SCHEMA,
   SHORTENING_MODE_INSTRUCTIONS,
 } from "./prompts";
+import { executeOmniRouter } from "./omniRouter";
 
 export const runtime = "nodejs";
 
-const DEFAULT_GOOGLE_MODEL = "models/gemini-1.5-pro";
-const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-preview";
-const METADATA_MIME_TYPE = "application/json; charset=utf-8";
-const TRANSCRIPT_MIME_TYPE = "text/plain";
-const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION?.trim() || "v1";
-const GEMINI_UPLOAD_API_VERSION =
-  process.env.GEMINI_UPLOAD_API_VERSION?.trim() ||
-  (GEMINI_API_VERSION === "v1" ? "v1beta" : GEMINI_API_VERSION);
-const GENERATION_CONFIG = {
-  temperature: 0.2,
-  topK: 40,
-  topP: 0.9,
-};
-
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
-const OPENROUTER_BASE_URL =
-  process.env.OPENROUTER_BASE_URL?.replace(/\/$/, "") ||
-  "https://openrouter.ai/api/v1";
-const OPENROUTER_SITE_URL =
-  process.env.OPENROUTER_SITE_URL ||
-  process.env.NEXT_PUBLIC_APP_URL ||
-  "http://localhost:3000";
-const OPENROUTER_APP_TITLE =
-  process.env.OPENROUTER_APP_TITLE || "VideoClipper";
-const DEFAULT_SHORTENING_MODE = "disfluency";
-const MIN_VARIANT_COUNT = 1;
+const DEFAULT_VARIANT_COUNT = 3;
 const MAX_VARIANT_COUNT = 3;
-const DEFAULT_VARIANT_COUNT = 1;
-const SENTENCE_END_REGEX = /[.!?]["')\]]?$/;
-const SENTENCE_GAP_SECONDS = 0.8;
-const SENTENCE_MIN_COVERAGE = 0.6;
+const MIN_VARIANT_COUNT = 1;
+const DEFAULT_SHORTENING_MODE = "auto";
+const SENTENCE_GAP_SECONDS = 0.85;
+const SENTENCE_END_REGEX = /[.!?]$/;
 
-const isValidShorteningMode = (value) =>
-  typeof value === "string" && Object.hasOwn(SHORTENING_MODE_INSTRUCTIONS, value);
+const isValidShorteningMode = (mode) =>
+  mode === "auto" ||
+  mode === "sixty_seconds" ||
+  mode === "thirty_seconds" ||
+  mode === "multi_short";
 
 const normalizeVariantCount = (value) => {
   const numeric = Number.parseInt(value, 10);
@@ -59,7 +39,9 @@ const buildInstructions = (mode, variantCount) => {
   const focus = SHORTENING_MODE_INSTRUCTIONS[resolved];
   const resolvedVariants = normalizeVariantCount(variantCount);
   const schemaSection =
-    resolvedVariants > 1
+    resolved === "multi_short"
+      ? MULTI_SHORT_RESPONSE_SCHEMA
+      : resolvedVariants > 1
       ? buildMultiConceptSchema(resolvedVariants)
       : SINGLE_RESPONSE_SCHEMA;
   return `${BASE_INSTRUCTIONS}\n\n${schemaSection}\n\nShortening objective:\n${focus}\n\nImplementation notes:\n- trimmed_text must use only words from TRANSCRIPT_TEXT, in order; deletions only.\n- Keep complete sentences; avoid clipped fragments.\n- estimated_duration_seconds can be a rough estimate.\n- Use notes to briefly describe the main deletions or any unmet constraints.`;
@@ -70,6 +52,8 @@ const readEnvProvider = () => {
     process.env.GEMINI_PROVIDER?.trim().toLowerCase() ||
     process.env.NEXT_PUBLIC_GEMINI_PROVIDER?.trim().toLowerCase();
   if (explicit) return explicit;
+  if (process.env.LOCAL_LLM_URL || process.env.USE_LOCAL_LLM === "true") return "local";
+  if (process.env.NVIDIA_API_KEY) return "nvidia";
   const hasOpenRouterKey =
     !!(
       process.env.OPENROUTER_API_KEY ||
@@ -78,8 +62,12 @@ const readEnvProvider = () => {
   return hasOpenRouterKey ? "openrouter" : "google";
 };
 
-const normalizeProvider = (value) =>
-  value === "openrouter" ? "openrouter" : "google";
+const normalizeProvider = (value) => {
+  if (value === "nvidia") return "nvidia";
+  if (value === "openrouter") return "openrouter";
+  if (value === "local" || value === "ollama" || value === "vllm" || value === "lmstudio") return "local";
+  return "google";
+};
 
 const resolveProvider = (requestedProvider) => {
   const candidate =
@@ -87,20 +75,6 @@ const resolveProvider = (requestedProvider) => {
       ? requestedProvider.trim().toLowerCase()
       : readEnvProvider();
   return normalizeProvider(candidate);
-};
-
-const normalizeModelId = (value, provider) => {
-  if (provider === "openrouter") {
-    const trimmed = typeof value === "string" ? value.trim() : "";
-    return trimmed || DEFAULT_OPENROUTER_MODEL;
-  }
-
-  const trimmedValue =
-    typeof value === "string" ? value.trim().replace(/^\/+/, "") : "";
-  if (!trimmedValue) return DEFAULT_GOOGLE_MODEL;
-  return trimmedValue.startsWith("models/")
-    ? trimmedValue
-    : `models/${trimmedValue}`;
 };
 
 const buildTranscriptText = (sourceWords) => {
@@ -131,25 +105,6 @@ export async function POST(req) {
   try {
     const body = await req.json();
     const provider = resolveProvider(body?.provider);
-    const usingOpenRouter = provider === "openrouter";
-    const apiKey = usingOpenRouter
-      ? process.env.OPENROUTER_API_KEY ||
-        process.env.GEMINI_API_KEY ||
-        process.env.VITE_GEMINI_API_KEY ||
-        process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ||
-        ""
-      : process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || "";
-
-    if (!apiKey) {
-      const missingEnv = usingOpenRouter
-        ? "OPENROUTER_API_KEY (or GEMINI_API_KEY)"
-        : "GEMINI_API_KEY";
-      return NextResponse.json(
-        { error: `Missing ${missingEnv} environment variable` },
-        { status: 500 }
-      );
-    }
-
     const { model, words, shorteningMode, variantCount: requestedVariants } =
       body || {};
 
@@ -160,12 +115,12 @@ export async function POST(req) {
       );
     }
 
-    const targetModel = normalizeModelId(model, provider);
     const sourceWords = words;
     const transcriptText = buildTranscriptText(sourceWords);
     const resolvedShorteningMode = isValidShorteningMode(shorteningMode)
       ? shorteningMode
       : DEFAULT_SHORTENING_MODE;
+
     const defaultVariantFallback =
       resolvedShorteningMode === "sixty_seconds" ||
       resolvedShorteningMode === "thirty_seconds"
@@ -179,107 +134,32 @@ export async function POST(req) {
       variantCount
     );
 
-    const inlineParts = [
-      {
-        text: `${instructions}\n\nREQUESTED_VARIANTS: ${variantCount}\nTRANSCRIPT_TEXT:\n${transcriptText}`,
-      },
-    ];
+    const result = await executeOmniRouter({
+      preferredProviderId: provider,
+      requestedModel: model,
+      instructions,
+      transcriptText,
+    });
 
-    let data;
-    let fileUploadUsed = false;
-
-    if (usingOpenRouter) {
-      const openRouterAttempt = await generateWithOpenRouter({
-        apiKey,
-        targetModel,
-        instructions,
-        transcriptText,
-      });
-
-      if (!openRouterAttempt.ok) {
-        return NextResponse.json(
-          { error: "Gemini API error", detail: openRouterAttempt.detail },
-          { status: openRouterAttempt.status }
-        );
-      }
-
-      data = openRouterAttempt.data;
-    } else {
-      try {
-        const fileUri = await uploadTranscriptFile({
-          apiKey,
-          contents: transcriptText,
-          mimeType: TRANSCRIPT_MIME_TYPE,
-          apiVersion: GEMINI_UPLOAD_API_VERSION,
-        });
-
-        const fileParts = [
-          {
-            text: `${instructions}\n\nREQUESTED_VARIANTS: ${variantCount}\nTRANSCRIPT_FILE_URI: ${fileUri}\nThe attached file contains TRANSCRIPT_TEXT.`,
-          },
-          {
-            fileData: { fileUri, mimeType: TRANSCRIPT_MIME_TYPE },
-          },
-        ];
-
-        const fileAttempt = await generateWithGemini({
-          apiKey,
-          targetModel,
-          parts: fileParts,
-          apiVersion: GEMINI_API_VERSION,
-        });
-
-        if (fileAttempt.ok) {
-          data = fileAttempt.data;
-          fileUploadUsed = true;
-        } else {
-          console.warn(
-            "[Gemini API Route] Gemini request with uploaded file failed; retrying with inline payload",
-            fileAttempt.detail
-          );
-        }
-      } catch (uploadError) {
-        console.warn(
-          "[Gemini API Route] File upload failed, falling back to inline payload",
-          uploadError
-        );
-      }
-
-      if (!data) {
-        const inlineAttempt = await generateWithGemini({
-          apiKey,
-          targetModel,
-          parts: inlineParts,
-          apiVersion: GEMINI_API_VERSION,
-        });
-
-        if (!inlineAttempt.ok) {
-          return NextResponse.json(
-            { error: "Gemini API error", detail: inlineAttempt.detail },
-            { status: inlineAttempt.status }
-          );
-        }
-
-        data = inlineAttempt.data;
-      }
+    if (!result.ok) {
+      return NextResponse.json(
+        { error: "Omni Router generation failed", detail: result.detail },
+        { status: result.status || 500 }
+      );
     }
 
-    const headers = fileUploadUsed
-      ? { "x-gemini-file-upload": "true" }
-      : undefined;
-
-    // Return the raw Gemini response without expanding trimmed_text to trimmed_words.
-    // The client will handle the conversion using its local source words.
-    return NextResponse.json(data, {
-      status: 200,
-      headers,
-    });
+    const response = NextResponse.json(result.data);
+    response.headers.set("x-omni-router-provider", result.provider);
+    response.headers.set("x-omni-router-model", result.model);
+    response.headers.set("x-omni-router-attempts", String(result.attemptsCount));
+    return response;
   } catch (error) {
-    console.error("[Gemini API Route]", error);
+    const causeMsg = error?.cause ? ` (${error.cause.message || error.cause.code || String(error.cause)})` : "";
+    console.error("[Gemini API Route]", error, error?.cause);
     return NextResponse.json(
       {
         error: "Server error",
-        detail: error instanceof Error ? error.message : String(error),
+        detail: (error instanceof Error ? error.message : String(error)) + causeMsg,
       },
       { status: 500 }
     );
@@ -371,6 +251,7 @@ async function generateWithGemini({ apiKey, targetModel, parts, apiVersion }) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(600000),
   });
 
   if (response.ok) {
@@ -390,6 +271,7 @@ async function generateWithOpenRouter({
   targetModel,
   instructions,
   transcriptText,
+  baseUrl = OPENROUTER_BASE_URL,
 }) {
   const messages = [
     {
@@ -417,19 +299,50 @@ async function generateWithOpenRouter({
     messages,
     temperature: GENERATION_CONFIG.temperature,
     top_p: GENERATION_CONFIG.topP,
+    max_tokens: 4096,
     response_format: { type: "json_object" },
   };
 
-  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": OPENROUTER_SITE_URL,
-      "X-Title": OPENROUTER_APP_TITLE,
-    },
-    body: JSON.stringify(payload),
-  });
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (baseUrl.includes("openrouter.ai")) {
+    headers["HTTP-Referer"] = OPENROUTER_SITE_URL;
+    headers["X-Title"] = OPENROUTER_APP_TITLE;
+  }
+
+  let response;
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(600000),
+      });
+      if (response.ok || response.status < 500) {
+        break;
+      }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Gemini API Route] Fetch attempt ${attempt} failed:`, err?.message || err, err?.cause);
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
+
+  if (!response) {
+    const cause = lastError?.cause ? ` (${lastError.cause.message || lastError.cause.code || String(lastError.cause)})` : "";
+    return {
+      ok: false,
+      status: 502,
+      detail: `Network fetch failed connecting to API: ${lastError?.message || "Unknown error"}${cause}`,
+    };
+  }
 
   if (!response.ok) {
     const detail = await response.text();
