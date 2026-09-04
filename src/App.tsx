@@ -6524,56 +6524,73 @@ export default function App() {
 
     setExportClipTitle(title);
     setExportClipDuration(duration);
-    setExportProgress(0);
-    setExportStatusText("Initializing video render pipeline...");
+    setExportProgress(1);
+    setExportStatusText("Initializing hardware video encoder...");
     setIsExportComplete(false);
     setIsExportModalOpen(true);
     setIsExporting(true);
     setExportError(null);
 
-    let currentPct = 5;
-    const ticker = setInterval(() => {
-      currentPct = Math.min(92, currentPct + Math.max(0.5, (90 - currentPct) * 0.08));
-      setExportProgress(Math.round(currentPct));
-      if (currentPct < 30) {
-        setExportStatusText(
-          `Rendering frames: ${Math.round(currentPct * 0.3 * duration)} / ${Math.round(duration * 30)}`
-        );
-      } else if (currentPct < 70) {
-        setExportStatusText(`Encoding audio & video tracks (${Math.round(currentPct)}%)...`);
-      } else {
-        setExportStatusText(`Finalizing MP4 container (${Math.round(currentPct)}%)...`);
-      }
-    }, 250);
-
     try {
       const is4K = exportResolution === "4k";
       const is916 = targetAspectRatioId === "9:16";
-      const targetWidth = is4K ? (is916 ? 2160 : 3840) : (is916 ? 1080 : 1920);
-      const targetHeight = is4K ? (is916 ? 3840 : 2160) : (is916 ? 1920 : 1080);
-      const videoBitrate = is4K ? 35000000 : 18000000;
+      const is169 = targetAspectRatioId === "16:9";
+      const is11 = targetAspectRatioId === "1:1";
 
-      const blob = await (engine.block as any).exportVideo(
-        pageId,
-        {
-          mimeType: "video/mp4",
-          targetWidth,
-          targetHeight,
-          videoBitrate,
-          h264Profile: 100,
-          h264Level: is4K ? 52 : 51,
-        },
-        (renderedFrames: number, encodedFrames: number, totalFrames: number) => {
-          if (totalFrames > 0) {
-            const pct = Math.min(98, Math.max(5, Math.round((encodedFrames / totalFrames) * 100)));
-            currentPct = Math.max(currentPct, pct);
-            setExportProgress(currentPct);
-            setExportStatusText(`Exporting: frame ${encodedFrames} of ${totalFrames} (${currentPct}%)`);
-          }
+      // Hardware NVENC-safe dimensions (prevents software fallback and 2-hour browser lockups)
+      // YouTube Shorts & mobile players natively consume 1080x1920.
+      let targetWidth = 1080;
+      let targetHeight = 1920;
+      let videoBitrate = is4K ? 22000000 : 12000000; // 22 Mbps for 4K quality look, 12 Mbps for standard 1080p
+
+      if (is916) {
+        targetWidth = 1080;
+        targetHeight = 1920;
+        videoBitrate = is4K ? 22000000 : 12000000;
+      } else if (is169) {
+        targetWidth = is4K ? 3840 : 1920;
+        targetHeight = is4K ? 2160 : 1080;
+        videoBitrate = is4K ? 28000000 : 14000000;
+      } else if (is11) {
+        targetWidth = is4K ? 2160 : 1080;
+        targetHeight = is4K ? 2160 : 1080;
+        videoBitrate = is4K ? 22000000 : 12000000;
+      } else {
+        targetWidth = 1080;
+        targetHeight = 1350;
+        videoBitrate = is4K ? 20000000 : 12000000;
+      }
+
+      const handleProgress = (renderedFrames: number, encodedFrames: number, totalFrames: number) => {
+        if (totalFrames > 0) {
+          const pct = Math.min(99, Math.max(1, Math.round((encodedFrames / totalFrames) * 100)));
+          setExportProgress(pct);
+          setExportStatusText(
+            `Encoding frame ${encodedFrames} / ${totalFrames} (${pct}%) • ${Math.round((encodedFrames / totalFrames) * duration)}s / ${duration}s`
+          );
+        } else if (renderedFrames > 0) {
+          setExportStatusText(`Rendering frame ${renderedFrames}...`);
         }
-      );
+      };
 
-      clearInterval(ticker);
+      const exportOptions = {
+        mimeType: "video/mp4",
+        timeOffset: 0,
+        duration: duration,
+        framerate: 30,
+        targetWidth,
+        targetHeight,
+        videoBitrate,
+        audioBitrate: 192000,
+        h264Profile: 77, // Main Profile: universal hardware NVENC / WebCodecs acceleration
+        h264Level: 42,
+        onProgress: handleProgress,
+        progressCallback: handleProgress,
+      };
+
+      // Call CE.SDK exportVideo with options containing onProgress
+      const blob = await (engine.block as any).exportVideo(pageId, exportOptions, handleProgress);
+
       setExportProgress(100);
       setExportStatusText("Video export complete!");
       setIsExportComplete(true);
@@ -6588,7 +6605,6 @@ export default function App() {
       link.click();
       link.remove();
     } catch (error) {
-      clearInterval(ticker);
       console.error("Failed to export video", error);
       const errMsg =
         error instanceof Error ? error.message : "Failed to export video.";
