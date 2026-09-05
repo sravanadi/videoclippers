@@ -219,7 +219,185 @@ export const VideoEnhancementCard: React.FC<VideoEnhancementCardProps> = ({
         </div>
       </div>
 
-      {/* Section 3: Caption Highlight & Styling */}
+      {/* Section 3: Manual Post-Processing Adjustments (Sharpen, Noise Reduce, Quality Boost) */}
+      <div className="space-y-3 border-t border-zinc-800/60 pt-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Sliders className="h-3.5 w-3.5 text-zinc-300" />
+            <span className="text-xs font-semibold text-white">
+              Manual 4K Adjustments
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              onUpdateColorGradeSettings({
+                ...colorGradeSettings,
+                sharpness: 0.25,
+                noiseReduction: 0.15,
+                qualityIncrease: 0.35,
+                exposure: 0.0,
+                contrast: 0.1,
+                saturation: 0.05,
+                temperature: 0.0,
+              });
+            }}
+            className="text-[10px] text-zinc-400 hover:text-white underline underline-offset-2 transition"
+            title="Reset manual sliders to balanced 4K defaults"
+          >
+            Reset Defaults
+          </button>
+        </div>
+
+        {/* Sliders Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3">
+          {/* Sharpen */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-300 font-medium">Sharpening</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {Math.round((colorGradeSettings.sharpness ?? 0) * 100)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.02"
+              value={colorGradeSettings.sharpness ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  sharpness: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+
+          {/* Noise Reduction */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-300 font-medium">Noise Reduction</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {Math.round((colorGradeSettings.noiseReduction ?? 0) * 100)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.02"
+              value={colorGradeSettings.noiseReduction ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  noiseReduction: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+
+          {/* Quality Increase / Detail Boost */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-300 font-medium">Quality Increase</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {Math.round((colorGradeSettings.qualityIncrease ?? 0) * 100)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.02"
+              value={colorGradeSettings.qualityIncrease ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  qualityIncrease: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+
+          {/* Exposure */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-400">Exposure</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {(colorGradeSettings.exposure ?? 0).toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="-0.5"
+              max="0.5"
+              step="0.02"
+              value={colorGradeSettings.exposure ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  exposure: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+
+          {/* Contrast */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-400">Contrast</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {(colorGradeSettings.contrast ?? 0).toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="-0.2"
+              max="0.5"
+              step="0.02"
+              value={colorGradeSettings.contrast ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  contrast: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+
+          {/* Saturation */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-400">Saturation</span>
+              <span className="font-mono text-zinc-400 text-[10px]">
+                {(colorGradeSettings.saturation ?? 0).toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="-0.3"
+              max="0.5"
+              step="0.02"
+              value={colorGradeSettings.saturation ?? 0}
+              onChange={(e) =>
+                onUpdateColorGradeSettings({
+                  ...colorGradeSettings,
+                  saturation: parseFloat(e.target.value),
+                })
+              }
+              className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-white"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Section 4: Caption Highlight & Styling */}
       <div className="space-y-2 border-t border-zinc-800/60 pt-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">

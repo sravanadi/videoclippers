@@ -21,7 +21,8 @@ const isValidShorteningMode = (mode) =>
   mode === "auto" ||
   mode === "sixty_seconds" ||
   mode === "thirty_seconds" ||
-  mode === "multi_short";
+  mode === "multi_short" ||
+  mode === "gaming";
 
 const normalizeVariantCount = (value) => {
   const numeric = Number.parseInt(value, 10);

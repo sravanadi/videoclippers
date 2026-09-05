@@ -53,6 +53,12 @@ const OPTIONS: {
     description:
       "Automatically discover 3 to 6 standalone viral short clips for TikTok / Reels.",
   },
+  {
+    value: "gaming",
+    title: "🎮 Gaming Videos",
+    description:
+      "Automatically slices your gameplay video into multiple >1 min clips across the full video. Extracts more clips for longer videos.",
+  },
 ];
 
 const TrimFocusCard = ({

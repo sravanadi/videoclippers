@@ -32,12 +32,15 @@ export const useCesdkEditor = ({
       setIsEditorLoading(true);
       setEditorError(null);
       try {
-        const [{ default: CreativeEditorSDK }, archiveUrl] = await Promise.all([
+        const [{ default: CreativeEditorSDK }, sceneString] = await Promise.all([
           import("@cesdk/cesdk-js"),
           (async () => {
             const engine = engineRef.current;
             if (!engine) return null;
             try {
+              if (typeof engine.scene.saveToString === "function") {
+                return await engine.scene.saveToString();
+              }
               const archive = await engine.scene.saveToArchive();
               return URL.createObjectURL(archive);
             } catch (sceneError) {
@@ -125,30 +128,35 @@ export const useCesdkEditor = ({
           console.warn("Could not enable all advanced features", featErr);
         }
 
-        try {
-          await editor.addDefaultAssetSources({
-            baseURL: DEFAULT_ASSET_LIBRARY_BASE_URL,
-          });
-        } catch (assetError) {
-          console.warn("Failed to preload editor asset sources", assetError);
-        }
-        try {
-          await editor.addDemoAssetSources({
-            baseURL: DEMO_ASSET_LIBRARY_BASE_URL,
-            sceneMode: "Video",
-          });
-        } catch (demoError) {
-          console.warn("Failed to add demo assets", demoError);
-        }
-        if (archiveUrl) {
+        // Load scene immediately for instant startup
+        if (sceneString) {
           try {
-            await editor.loadFromArchiveURL(archiveUrl, true);
-          } finally {
-            URL.revokeObjectURL(archiveUrl);
+            if (sceneString.startsWith("blob:")) {
+              await editor.loadFromArchiveURL(sceneString, true);
+              URL.revokeObjectURL(sceneString);
+            } else {
+              await editor.engine.scene.loadFromString(sceneString);
+            }
+          } catch (loadErr) {
+            console.warn("Failed to load scene string, creating video scene", loadErr);
+            await editor.createVideoScene();
           }
         } else {
           await editor.createVideoScene();
         }
+
+        // Preload asset sources in background without blocking editor presentation
+        editor.addDefaultAssetSources({
+          baseURL: DEFAULT_ASSET_LIBRARY_BASE_URL,
+        }).catch((assetError: any) => {
+          console.warn("Failed to preload editor asset sources", assetError);
+        });
+        editor.addDemoAssetSources({
+          baseURL: DEMO_ASSET_LIBRARY_BASE_URL,
+          sceneMode: "Video",
+        }).catch((demoError: any) => {
+          console.warn("Failed to add demo assets", demoError);
+        });
       } catch (error) {
         if (!isCancelled) {
           setEditorError(
@@ -170,19 +178,19 @@ export const useCesdkEditor = ({
         // Sync modified scene back to main engine
         if (engineRef.current) {
           try {
-            editorInstanceRef.current.engine.scene
-              .saveToArchive()
-              .then((updatedArchive: Blob) => {
-                const updatedArchiveUrl = URL.createObjectURL(updatedArchive);
-                engineRef.current?.scene
-                  .loadFromArchiveURL(updatedArchiveUrl)
-                  .finally(() => {
-                    URL.revokeObjectURL(updatedArchiveUrl);
-                  });
-              })
-              .catch((syncErr: any) => {
+            const currentEditor = editorInstanceRef.current;
+            (async () => {
+              try {
+                if (typeof currentEditor.engine?.scene?.saveToString === "function") {
+                  const updatedScene = await currentEditor.engine.scene.saveToString();
+                  if (updatedScene && engineRef.current) {
+                    await engineRef.current.scene.loadFromString(updatedScene);
+                  }
+                }
+              } catch (syncErr) {
                 console.warn("Failed to sync scene back on editor close", syncErr);
-              });
+              }
+            })();
           } catch (syncErr) {
             console.warn("Failed to trigger scene sync", syncErr);
           }

@@ -23,6 +23,8 @@ export interface ColorGradeSettings {
   highlights: number; // -1 to 1 (recover bright skies / HUDs)
   shadows: number; // -1 to 1 (lift dark gaming shadows)
   saturation: number; // -1 to 1 (vibrancy without oversaturation)
+  noiseReduction: number; // 0 to 1 (reduce grain / compression artifacts)
+  qualityIncrease: number; // 0 to 1 (detail, micro-contrast & clarity boost)
 }
 
 export interface ColorGradePreset {
@@ -50,6 +52,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: -0.04,
       shadows: 0.08,
       saturation: 0.06,
+      noiseReduction: 0.2,
+      qualityIncrease: 0.35,
     },
   },
   vibrant_gaming: {
@@ -68,6 +72,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: -0.06,
       shadows: 0.16,
       saturation: 0.12,
+      noiseReduction: 0.15,
+      qualityIncrease: 0.4,
     },
   },
   cyberpunk: {
@@ -86,6 +92,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: 0.04,
       shadows: 0.06,
       saturation: 0.10,
+      noiseReduction: 0.1,
+      qualityIncrease: 0.3,
     },
   },
   warm_film: {
@@ -104,6 +112,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: -0.08,
       shadows: 0.10,
       saturation: 0.04,
+      noiseReduction: 0.25,
+      qualityIncrease: 0.25,
     },
   },
   natural_studio: {
@@ -122,6 +132,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: 0.0,
       shadows: 0.05,
       saturation: 0.0,
+      noiseReduction: 0.2,
+      qualityIncrease: 0.2,
     },
   },
   none: {
@@ -140,6 +152,8 @@ export const COLOR_GRADE_PRESETS: Record<ColorGradePresetId, ColorGradePreset> =
       highlights: 0,
       shadows: 0,
       saturation: 0,
+      noiseReduction: 0,
+      qualityIncrease: 0,
     },
   },
 };
@@ -217,6 +231,8 @@ export function analyzeFrameHistogram(
     highlights: -0.05,
     shadows: avgLum < 100 ? 0.15 : 0.08,
     saturation: 0.06, // Natural vibrancy, zero oversaturation
+    noiseReduction: 0.2,
+    qualityIncrease: 0.35,
   };
 }
 
@@ -257,11 +273,14 @@ export function applyColorGradeToEngineBlock(
       }
     };
 
+    const effectiveSharpness = Math.min(1.0, (settings.sharpness ?? 0) + (settings.qualityIncrease ?? 0) * 0.25);
+    const effectiveClarity = Math.min(1.0, (settings.clarity ?? 0) + (settings.qualityIncrease ?? 0) * 0.3);
+
     setSafe("effect/adjustments/exposure", settings.exposure);
     setSafe("effect/adjustments/contrast", settings.contrast);
     setSafe("effect/adjustments/temperature", settings.temperature);
-    setSafe("effect/adjustments/sharpness", settings.sharpness);
-    setSafe("effect/adjustments/clarity", settings.clarity);
+    setSafe("effect/adjustments/sharpness", effectiveSharpness);
+    setSafe("effect/adjustments/clarity", effectiveClarity);
     setSafe("effect/adjustments/whites", settings.whites);
     setSafe("effect/adjustments/blacks", settings.blacks);
     setSafe("effect/adjustments/highlights", settings.highlights);

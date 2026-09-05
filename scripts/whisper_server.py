@@ -234,13 +234,16 @@ async def export_video_gpu(
     saturation: float = Form(1.0),
     temperature: float = Form(0.0),
     tint: float = Form(0.0),
+    sharpen: float = Form(0.0),
+    noise_reduction: float = Form(0.0),
+    quality_increase: float = Form(0.0),
     subtitles_srt: Optional[str] = Form(None),
     clip_title: Optional[str] = Form("clip")
 ):
     if not file:
         raise HTTPException(status_code=400, detail="No video file provided.")
 
-    logger.info(f"Received GPU export request: {file.filename}, start={start_time}, end={end_time}, ratio={aspect_ratio}, res={resolution}, color={color_preset}")
+    logger.info(f"Received GPU export request: {file.filename}, start={start_time}, end={end_time}, ratio={aspect_ratio}, res={resolution}, color={color_preset}, sharpen={sharpen}, nr={noise_reduction}, qi={quality_increase}")
 
     # Save uploaded input video
     in_suffix = os.path.splitext(file.filename)[1] or ".mp4"
@@ -279,27 +282,43 @@ async def export_video_gpu(
         # Aspect ratio framing: scale to fill and crop to exact dimensions
         filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h}")
 
-        # Color grading
+        # Noise reduction (hqdn3d)
+        if noise_reduction > 0.01:
+            luma_sp = max(1.0, round(noise_reduction * 8.0, 1))
+            chroma_sp = max(1.0, round(noise_reduction * 6.0, 1))
+            filters.append(f"hqdn3d={luma_sp}:{chroma_sp}:3:3")
+
+        # Color grading & tone curve
         preset_clean = color_preset.lower().strip()
-        if preset_clean == "cinematic":
-            filters.append("eq=contrast=1.15:saturation=1.2:brightness=-0.02,colorchannelmixer=rr=1.05:bb=0.95")
-        elif preset_clean == "warm_sunset":
-            filters.append("eq=contrast=1.08:saturation=1.25:brightness=0.03,colorchannelmixer=rr=1.12:gg=1.02:bb=0.88")
+        if preset_clean in ("cinematic", "auto_4k_cinematic"):
+            filters.append("eq=contrast=1.16:saturation=1.12:brightness=0.01,colorchannelmixer=rr=1.04:bb=0.96")
+        elif preset_clean in ("vibrant", "vibrant_gaming"):
+            filters.append("eq=contrast=1.18:saturation=1.25:brightness=0.03,colorchannelmixer=rr=1.02:gg=1.02:bb=0.98")
         elif preset_clean == "cyberpunk":
-            filters.append("eq=contrast=1.25:saturation=1.35:brightness=-0.04,colorchannelmixer=rr=0.92:gg=0.95:bb=1.2")
-        elif preset_clean == "moody_cool":
-            filters.append("eq=contrast=1.1:saturation=0.9:brightness=-0.02,colorchannelmixer=rr=0.9:gg=0.98:bb=1.12")
-        elif preset_clean == "vintage":
-            filters.append("eq=contrast=1.05:saturation=0.85:brightness=0.04,colorchannelmixer=rr=1.08:gg=1.0:bb=0.92")
+            filters.append("eq=contrast=1.25:saturation=1.35:brightness=-0.02,colorchannelmixer=rr=0.92:gg=0.95:bb=1.2")
+        elif preset_clean in ("warm_sunset", "warm_film"):
+            filters.append("eq=contrast=1.12:saturation=1.15:brightness=0.02,colorchannelmixer=rr=1.12:gg=1.02:bb=0.88")
+        elif preset_clean in ("natural_studio", "studio"):
+            filters.append("eq=contrast=1.08:saturation=1.05:brightness=0.0")
         elif preset_clean == "contrast":
             filters.append("eq=contrast=1.3:saturation=1.15:brightness=-0.02")
-        elif preset_clean == "vibrant":
-            filters.append("eq=contrast=1.12:saturation=1.35:brightness=0.02")
-        elif contrast != 1.0 or brightness != 0.0 or saturation != 1.0:
+        elif contrast != 1.0 or brightness != 0.0 or saturation != 1.0 or temperature != 0.0:
             c = max(0.5, min(2.0, contrast))
             b = max(-0.5, min(0.5, brightness))
             s = max(0.0, min(3.0, saturation))
-            filters.append(f"eq=contrast={c}:brightness={b}:saturation={s}")
+            eq_filter = f"eq=contrast={c}:brightness={b}:saturation={s}"
+            if temperature != 0.0:
+                rr = round(max(0.7, min(1.3, 1.0 + temperature * 0.2)), 2)
+                bb = round(max(0.7, min(1.3, 1.0 - temperature * 0.2)), 2)
+                eq_filter += f",colorchannelmixer=rr={rr}:bb={bb}"
+            filters.append(eq_filter)
+
+        # Detail sharpening & quality increase (unsharp filter)
+        effective_sharpen = sharpen + (quality_increase * 0.5)
+        if effective_sharpen > 0.01:
+            la = round(min(2.5, effective_sharpen * 1.8), 2)
+            ca = round(la * 0.5, 2)
+            filters.append(f"unsharp=5:5:{la}:5:5:{ca}")
 
         # Subtitles filter if provided
         if srt_path:

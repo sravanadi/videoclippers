@@ -5,6 +5,7 @@ import type {
   GeminiRefinementOptions,
   RefinementMode,
 } from "./types";
+import { generateGamingShortCandidates } from "./gamingSlicer";
 
 const parseResponseError = async (
   response: Response,
@@ -115,7 +116,8 @@ export const requestGeminiRefinement = async (
 };
 
 export const requestMultiShortFleet = async (
-  words: TranscriptWord[]
+  words: TranscriptWord[],
+  videoDuration?: number
 ): Promise<{ shorts: import("./multiShortTypes").ShortClipCandidate[]; rawText: string }> => {
   const geminiProvider = "local";
   const model =
@@ -197,8 +199,21 @@ export const requestMultiShortFleet = async (
     }
   }
 
+  const actualDuration = (videoDuration && videoDuration > 0)
+    ? videoDuration
+    : (words.length > 0 ? Math.max(words[words.length - 1].end - words[0].start, words[words.length - 1].end) : 180);
+
   if (rawShorts.length === 0) {
-    throw new Error("Multi-short response did not contain any valid short clip candidates.");
+    console.warn("[MultiShort] AI did not extract dialogue clips. Engaging full-video gaming slicer fallback...");
+    const fallbackShorts = generateGamingShortCandidates({
+      totalDuration: actualDuration,
+      minClipDuration: 62,
+      targetClipDuration: 70,
+    });
+    return {
+      shorts: fallbackShorts,
+      rawText: rawText || "Fallback: Sliced full video into non-overlapping >1 min gaming highlights.",
+    };
   }
   const processedShorts: import("./multiShortTypes").ShortClipCandidate[] = [];
 
@@ -352,6 +367,20 @@ export const requestMultiShortFleet = async (
         searchIdx = nextBoundary + 1;
       }
     }
+  }
+
+  const hasValidClips = processedShorts.some((s) => s.durationSeconds >= 60);
+  if ((!hasValidClips || processedShorts.length === 0) && actualDuration >= 60) {
+    console.warn("[MultiShort] Extracted clips were under 60s (sparse audio). Slicing full video duration...");
+    const fallbackShorts = generateGamingShortCandidates({
+      totalDuration: actualDuration,
+      minClipDuration: 62,
+      targetClipDuration: 70,
+    });
+    return {
+      shorts: fallbackShorts,
+      rawText: rawText || "Fallback: Sliced full video into non-overlapping >1 min gaming highlights.",
+    };
   }
 
   return {

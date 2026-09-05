@@ -30,6 +30,7 @@ import { transcribeWithOpenAI } from "@/features/shortener/openAi";
 import { transcribeWithLocalWhisper } from "@/features/shortener/localWhisper";
 import { requestGeminiRefinement, requestMultiShortFleet } from "@/features/shortener/gemini";
 import type { ShortClipCandidate } from "@/features/shortener/multiShortTypes";
+import { generateGamingShortCandidates } from "@/features/shortener/gamingSlicer";
 import { MultiShortDrawer } from "@/components/MultiShortDrawer";
 import { buildKeepRangesFromWords } from "@/features/shortener/keepRanges";
 import { useShortenerWorkflow } from "@/features/shortener/use-shortener-workflow";
@@ -3440,6 +3441,17 @@ export default function App() {
     }
 
     setVideoFile(file);
+    try {
+      const probeVideo = document.createElement("video");
+      probeVideo.preload = "metadata";
+      probeVideo.onloadedmetadata = () => {
+        if (Number.isFinite(probeVideo.duration) && probeVideo.duration > 0) {
+          setSourceVideoDuration(probeVideo.duration);
+        }
+        URL.revokeObjectURL(probeVideo.src);
+      };
+      probeVideo.src = URL.createObjectURL(file);
+    } catch {}
     setIsExtracting(true);
     resetWorkflowState();
     resetPreloadState();
@@ -3448,7 +3460,6 @@ export default function App() {
     setTimelineSegments([]);
     setIsScrubbingTimeline(false);
     setCurrentTranscriptWords([]);
-    setSourceVideoDuration(0);
     setSourceVideoSize(null);
     setAnalysisEstimate(null);
     setAnalysisStage(null);
@@ -4855,6 +4866,58 @@ export default function App() {
     clearCaptionsTrack();
 
     try {
+      // Compute accurate full video duration
+      let fullVideoDuration = sourceVideoDuration;
+      if (!fullVideoDuration && timelineDuration) {
+        fullVideoDuration = timelineDuration;
+      }
+      if (!fullVideoDuration && pageRef.current && engineRef.current) {
+        try {
+          fullVideoDuration = engineRef.current.block.getDuration(pageRef.current);
+        } catch {}
+      }
+      if (!fullVideoDuration) fullVideoDuration = 180;
+
+      // 1. Direct Long Video to Multiple Shorts (Gaming) Mode
+      if (refinementMode === "gaming") {
+        activeStep = "analysis";
+        updateProcessingStatus("audio", "complete");
+        updateProcessingStatus("transcript", "complete");
+        updateProcessingStatus("analysis", "active");
+
+        const shorts = generateGamingShortCandidates({
+          totalDuration: fullVideoDuration,
+          minClipDuration: 62, // strictly > 1 minute (60s)
+          targetClipDuration: 70,
+          maxClips: 30, // Dynamically extracts more clips for longer videos!
+        });
+
+        setMultiShorts(shorts);
+        if (shorts.length > 0) {
+          const firstShort = shorts[0];
+          setActiveShortClipId(firstShort.id);
+          setIsMultiShortDrawerOpen(true);
+          setTargetAspectRatioId("9:16");
+          setActiveColorGrade("vibrant_gaming");
+          setIsAutoColorGradeEnabled(true);
+          setColorGradeSettings(COLOR_GRADE_PRESETS["vibrant_gaming"].settings);
+
+          updateProcessingStatus("analysis", "complete");
+          updateProcessingStatus("preload", "complete");
+          setAutoProcessing(false);
+          setAutoProcessingError(null);
+
+          await applyTranscriptCuts(
+            firstShort.words,
+            firstShort.words,
+            firstShort.hook,
+            "9:16",
+            { start: firstShort.startTime, end: firstShort.endTime }
+          );
+        }
+        return;
+      }
+
       activeStep = "audio";
       updateProcessingStatus("audio", "active");
       setProgress(0);
@@ -4865,9 +4928,56 @@ export default function App() {
 
       activeStep = "transcript";
       updateProcessingStatus("transcript", "active");
-      let words = await transcribeExtractedAudio(audioBlob);
-      if (!words.length) {
-        throw new Error("Transcript did not contain any timestamped words.");
+      let words: TranscriptWord[] = [];
+      try {
+        words = await transcribeExtractedAudio(audioBlob);
+      } catch (whisperError) {
+        console.warn("[Transcription] Speech detection returned error or no speech:", whisperError);
+        words = [];
+      }
+
+      // Calculate the duration of spoken dialogue (speech span)
+      const speechDuration = words.length > 0
+        ? Math.max(0, words[words.length - 1].end - words[0].start)
+        : 0;
+
+      // If video has no speech or sparse speech (e.g. only 8s of audio in a long video),
+      // auto-slice the ENTIRE long video timeline instead of just that 8-second snippet!
+      if (!words || words.length === 0 || (speechDuration < 50 && fullVideoDuration >= 60)) {
+        console.info(`[Workflow] Sparse/silent speech detected (speech=${Math.round(speechDuration)}s, full video=${Math.round(fullVideoDuration)}s). Slicing entire long video into >1 min gaming clips...`);
+
+        const fallbackShorts = generateGamingShortCandidates({
+          totalDuration: fullVideoDuration,
+          minClipDuration: 62, // strictly > 1 minute
+          targetClipDuration: 70,
+          maxClips: 30, // Dynamically extracts more clips for longer videos!
+        });
+
+        setMultiShorts(fallbackShorts);
+        if (fallbackShorts.length > 0) {
+          const firstShort = fallbackShorts[0];
+          setActiveShortClipId(firstShort.id);
+          setIsMultiShortDrawerOpen(true);
+          setTargetAspectRatioId("9:16");
+          setActiveColorGrade("vibrant_gaming");
+          setIsAutoColorGradeEnabled(true);
+          setColorGradeSettings(COLOR_GRADE_PRESETS["vibrant_gaming"].settings);
+
+          updateProcessingStatus("transcript", "complete");
+          updateProcessingStatus("analysis", "complete");
+          updateProcessingStatus("preload", "complete");
+          setAutoProcessing(false);
+          setAutoProcessingError(null);
+
+          await applyTranscriptCuts(
+            firstShort.words,
+            firstShort.words,
+            firstShort.hook,
+            "9:16",
+            { start: firstShort.startTime, end: firstShort.endTime }
+          );
+        }
+        return;
       }
       updateProcessingStatus("transcript", "complete");
 
@@ -4875,7 +4985,7 @@ export default function App() {
       updateProcessingStatus("analysis", "active");
 
       if (refinementMode === "multi_short") {
-        const { shorts, rawText } = await requestMultiShortFleet(words);
+        const { shorts, rawText } = await requestMultiShortFleet(words, fullVideoDuration);
         setGeminiDebug(rawText);
         setMultiShorts(shorts);
         if (shorts.length > 0) {
@@ -4883,6 +4993,15 @@ export default function App() {
           setActiveShortClipId(firstShort.id);
           setIsMultiShortDrawerOpen(true);
           setTargetAspectRatioId("9:16");
+
+          if (firstShort.suggestedColorGrade && firstShort.suggestedColorGrade in COLOR_GRADE_PRESETS) {
+            const presetId = firstShort.suggestedColorGrade as ColorGradePresetId;
+            setActiveColorGrade(presetId);
+            setIsAutoColorGradeEnabled(presetId !== "none");
+            const settings = COLOR_GRADE_PRESETS[presetId].settings;
+            setColorGradeSettings(settings);
+          }
+
           updateProcessingStatus("analysis", "complete");
           updateProcessingStatus("preload", "complete");
           setAutoProcessing(false);
@@ -6215,7 +6334,7 @@ export default function App() {
     fallbackRange?: { start: number; end: number }
   ) => {
     const engine = engineRef.current;
-    if (!engine || !sourceWords.length) return;
+    if (!engine || (!sourceWords.length && !fallbackRange)) return;
     if (audioBlockRef.current && engine.block.isValid(audioBlockRef.current)) {
       try {
         engine.block.destroy(audioBlockRef.current);
@@ -6437,7 +6556,15 @@ export default function App() {
       }
     }
     setAudioPlaybackMuted(true);
-    await applyCaptionsForWords(refinedWords, { rangeMappings, sourceWords });
+    const isGamingOrSilent =
+      refinementMode === "gaming" ||
+      !currentTranscriptWords.length ||
+      (refinedWords.length === 1 && (refinedWords[0].end - refinedWords[0].start) > 10);
+    if (isGamingOrSilent) {
+      clearCaptionsTrack(engine);
+    } else {
+      await applyCaptionsForWords(refinedWords, { rangeMappings, sourceWords });
+    }
     const hookDuration = Math.min(
       HOOK_DURATION_SECONDS,
       newDuration || HOOK_DURATION_SECONDS
@@ -6554,6 +6681,9 @@ export default function App() {
       formData.append("saturation", (colorGradeSettings.saturation ?? 0).toString());
       formData.append("temperature", (colorGradeSettings.temperature ?? 0).toString());
       formData.append("tint", "0");
+      formData.append("sharpen", (colorGradeSettings.sharpness ?? 0).toString());
+      formData.append("noise_reduction", (colorGradeSettings.noiseReduction ?? 0).toString());
+      formData.append("quality_increase", (colorGradeSettings.qualityIncrease ?? 0).toString());
       formData.append("clip_title", title.replace(/[^a-zA-Z0-9_-]/g, "_"));
 
       if (captionsEnabled && currentTranscriptWords.length > 0) {
@@ -6748,13 +6878,40 @@ export default function App() {
 
   const handleGenerateShortsFleet = async () => {
     const words = currentTranscriptWords;
-    if (!words.length) {
-      alert("Please upload and transcribe a video first.");
-      return;
-    }
     setIsGeneratingFleet(true);
     try {
-      const { shorts, rawText } = await requestMultiShortFleet(words);
+      let shorts: ShortClipCandidate[] = [];
+      let rawText = "";
+
+      let totalVidDuration = sourceVideoDuration;
+      if (!totalVidDuration && timelineDuration) {
+        totalVidDuration = timelineDuration;
+      }
+      if (!totalVidDuration && pageRef.current && engineRef.current) {
+        try {
+          totalVidDuration = engineRef.current.block.getDuration(pageRef.current);
+        } catch {}
+      }
+      if (!totalVidDuration) totalVidDuration = 180;
+
+      const speechDuration = words.length > 0
+        ? Math.max(0, words[words.length - 1].end - words[0].start)
+        : 0;
+
+      if (!words.length || refinementMode === "gaming" || (speechDuration < 50 && totalVidDuration >= 60)) {
+        shorts = generateGamingShortCandidates({
+          totalDuration: totalVidDuration,
+          minClipDuration: 62,
+          targetClipDuration: 70,
+          maxClips: 30, // Dynamically extracts more clips for longer videos!
+        });
+        rawText = "Gaming Action Slicer: Generated >1 min non-overlapping highlights.";
+      } else {
+        const result = await requestMultiShortFleet(words, totalVidDuration);
+        shorts = result.shorts;
+        rawText = result.rawText;
+      }
+
       setGeminiDebug(rawText);
       setMultiShorts(shorts);
       if (shorts.length > 0) {
@@ -6773,8 +6930,9 @@ export default function App() {
           setColorGradeSettings(settings);
         }
 
+        const sourceWordsToUse = words.length ? words : firstShort.words;
         await applyTranscriptCuts(
-          words,
+          sourceWordsToUse,
           firstShort.words,
           firstShort.hook,
           "9:16",
@@ -6792,9 +6950,9 @@ export default function App() {
   };
 
   const handleSelectShortClip = async (short: ShortClipCandidate) => {
-    const words = currentTranscriptWords;
+    const words = currentTranscriptWords.length ? currentTranscriptWords : short.words;
     setActiveShortClipId(short.id);
-    setTargetAspectRatioId("9:16");
+    const ratioToApply = targetAspectRatioId || "9:16";
     setIsFaceCropPending(false);
 
     if (short.suggestedColorGrade && short.suggestedColorGrade in COLOR_GRADE_PRESETS) {
@@ -6809,7 +6967,7 @@ export default function App() {
       words,
       short.words,
       short.hook,
-      "9:16",
+      ratioToApply,
       { start: short.startTime, end: short.endTime }
     );
   };
@@ -7241,7 +7399,13 @@ export default function App() {
       <div className="flex min-h-screen flex-col bg-background">
         <AppHeader
           onLogoClick={handleRemoveVideo}
-          onOpenShortsFleet={() => setIsMultiShortDrawerOpen((prev) => !prev)}
+          onOpenShortsFleet={() => {
+            setIsMultiShortDrawerOpen((prev) => !prev);
+            const fleetEl = document.getElementById("shorts-fleet-section");
+            if (fleetEl) {
+              fleetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+          }}
           shortsCount={multiShorts.length}
         />
 
@@ -7574,6 +7738,23 @@ export default function App() {
                         exportEngine={exportEngine}
                         onChangeExportEngine={setExportEngine}
                       />
+
+                      {/* Shorts Fleet Clips Window - Positioned directly below AI Enhancement & Quality */}
+                      {multiShorts.length > 0 && (
+                        <div id="shorts-fleet-section" className="space-y-2">
+                          <MultiShortDrawer
+                            embedded={true}
+                            isOpen={true}
+                            shorts={multiShorts}
+                            activeClipId={activeShortClipId}
+                            onSelectClip={handleSelectShortClip}
+                            onExportClip={handleExportSingleShort}
+                            onExportAll={handleExportAllShorts}
+                            isExporting={isExporting}
+                            targetAspectRatio={targetAspectRatioId}
+                          />
+                        </div>
+                      )}
                       <Button
                         type="button"
                         variant="outline"
@@ -7684,7 +7865,7 @@ export default function App() {
           error={editorError}
         />
         <MultiShortDrawer
-          isOpen={isMultiShortDrawerOpen}
+          isOpen={isMultiShortDrawerOpen && !showResultStage}
           onClose={() => setIsMultiShortDrawerOpen(false)}
           shorts={multiShorts}
           activeClipId={activeShortClipId}
@@ -7692,6 +7873,7 @@ export default function App() {
           onExportClip={handleExportSingleShort}
           onExportAll={handleExportAllShorts}
           isExporting={isExporting}
+          targetAspectRatio={targetAspectRatioId}
           activeColorGrade={activeColorGrade}
           isAutoGrading={isAutoColorGradeEnabled}
           colorGradeSettings={colorGradeSettings}

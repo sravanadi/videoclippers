@@ -14,7 +14,8 @@ export type RefinementMode =
   | "thirty_seconds"
   | "sixty_seconds"
   | "summary"
-  | "multi_short";
+  | "multi_short"
+  | "gaming";
 export type SpeakerTemplateId =
   | "none"
   | "stacked"

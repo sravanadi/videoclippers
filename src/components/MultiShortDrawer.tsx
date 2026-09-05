@@ -20,14 +20,16 @@ import {
 } from "lucide-react";
 
 export interface MultiShortDrawerProps {
-  isOpen: boolean;
-  onClose: () => void;
+  isOpen?: boolean;
+  embedded?: boolean;
+  onClose?: () => void;
   shorts: ShortClipCandidate[];
   activeClipId: string | null;
   onSelectClip: (short: ShortClipCandidate) => void;
   onExportClip: (short: ShortClipCandidate) => void;
   onExportAll: () => void;
   isExporting: boolean;
+  targetAspectRatio?: string;
   // Enhancement & Quality Controls
   activeColorGrade?: ColorGradePresetId;
   isAutoGrading?: boolean;
@@ -44,7 +46,8 @@ export interface MultiShortDrawerProps {
 }
 
 export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
-  isOpen,
+  isOpen = true,
+  embedded = false,
   onClose,
   shorts,
   activeClipId,
@@ -52,6 +55,7 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
   onExportClip,
   onExportAll,
   isExporting,
+  targetAspectRatio = "9:16",
   activeColorGrade = "none",
   isAutoGrading = false,
   onSelectColorGrade,
@@ -89,6 +93,167 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
     const nextIdx = activeIndex < shorts.length - 1 ? activeIndex + 1 : 0;
     onSelectClip(shorts[nextIdx]);
   };
+
+  // 1. Embedded In-Page View (Rendered directly under AI Enhancements & Quality card)
+  if (embedded) {
+    return (
+      <div className="w-full rounded-xl border border-zinc-800/80 bg-zinc-950/90 shadow-xl backdrop-blur-md flex flex-col text-white text-left overflow-hidden">
+        {/* Header */}
+        <div className="p-3.5 border-b border-zinc-800/80 flex items-center justify-between bg-zinc-900/60">
+          <div className="flex items-center space-x-2.5">
+            <div className="p-1.5 bg-white/10 rounded-lg border border-white/15 text-white flex items-center justify-center">
+              <span className="text-base">✂️</span>
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-white tracking-wide flex items-center gap-2">
+                Shorts Fleet
+                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-white/10 text-zinc-300 border border-white/10">
+                  {shorts.length} Clips
+                </span>
+              </h2>
+              <p className="text-[11px] text-zinc-400">
+                YouTube Ready • Non-overlapping range (1:00 - 2:59)
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onExportAll}
+            disabled={isExporting || shorts.length === 0}
+            className="px-3 py-1.5 bg-white hover:bg-zinc-200 disabled:opacity-50 text-black rounded-lg text-xs font-semibold shadow-md transition-all flex items-center space-x-1 shrink-0"
+          >
+            <span>⚡ Export All ({shorts.length})</span>
+          </button>
+        </div>
+
+        {/* Quick Navigation Bar */}
+        {shorts.length > 1 && (
+          <div className="p-2.5 bg-zinc-900/40 border-b border-zinc-800/60 flex items-center justify-between text-xs">
+            <div className="flex items-center space-x-1.5 bg-zinc-950/80 px-2 py-1 rounded-lg border border-zinc-800">
+              <button
+                type="button"
+                onClick={handlePrev}
+                className="p-0.5 text-zinc-400 hover:text-white transition-colors"
+                title="Previous Clip"
+              >
+                ◀
+              </button>
+              <span className="text-[11px] font-mono text-zinc-300">
+                Clip {activeIndex >= 0 ? activeIndex + 1 : 1} of {shorts.length}
+              </span>
+              <button
+                type="button"
+                onClick={handleNext}
+                className="p-0.5 text-zinc-400 hover:text-white transition-colors"
+                title="Next Clip"
+              >
+                ▶
+              </button>
+            </div>
+            <span className="text-[11px] text-zinc-400 font-mono">
+              Active Ratio: {targetAspectRatio}
+            </span>
+          </div>
+        )}
+
+        {/* Clips List */}
+        <div className="p-3 space-y-2.5 max-h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
+          {shorts.length === 0 ? (
+            <div className="text-center py-8 text-zinc-500">
+              <p className="text-xs">No short clips extracted yet.</p>
+            </div>
+          ) : (
+            shorts.map((short, idx) => {
+              const isActive = activeClipId === short.id;
+              return (
+                <div
+                  key={short.id}
+                  onClick={() => onSelectClip(short)}
+                  className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
+                    isActive
+                      ? "bg-zinc-900 border-white/40 shadow-xl ring-1 ring-white/20"
+                      : "bg-zinc-950/50 border-zinc-800/80 hover:border-zinc-700 hover:bg-zinc-900/40"
+                  }`}
+                >
+                  {/* Viral Badge & Duration */}
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center space-x-1.5">
+                      <span className="text-[10px] font-mono text-zinc-300 bg-zinc-800 px-1.5 py-0.5 rounded">
+                        #{idx + 1}
+                      </span>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border border-white/20 bg-white/10 text-white">
+                        🔥 {short.viralScore}% Viral
+                      </span>
+                    </div>
+                    <div className="flex items-center space-x-1.5 text-[11px]">
+                      <span
+                        className="border border-zinc-700 bg-zinc-800/80 px-1.5 py-0.5 rounded text-zinc-200 font-mono text-[10px] font-semibold"
+                        title="YouTube Ready Duration (1:00 - 2:59)"
+                      >
+                        ⏱ {formatTime(short.durationSeconds)} (YT)
+                      </span>
+                      <span className="text-[10px] font-mono text-zinc-400">
+                        {formatTime(short.startTime)} - {formatTime(short.endTime)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Title & Hook */}
+                  <h3 className="text-xs font-semibold text-white group-hover:text-zinc-100 transition-colors line-clamp-1">
+                    {short.title}
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5 italic line-clamp-2 leading-tight">
+                    &quot;{short.hook}&quot;
+                  </p>
+                  {short.suggestedColorGrade && (
+                    <div className="mt-1.5 flex items-center gap-1.5">
+                      <span className="text-[9px] uppercase font-mono tracking-wider text-zinc-300 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
+                        🎨 {short.suggestedColorGrade.replace(/_/g, " ")}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Footer Controls */}
+                  <div className="mt-2.5 pt-2 border-t border-zinc-800/60 flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-500 font-mono">
+                      {short.words.length} words
+                    </span>
+                    <div className="flex items-center space-x-1.5">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectClip(short);
+                        }}
+                        className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                          isActive
+                            ? "bg-white text-black font-semibold shadow-sm"
+                            : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-white"
+                        }`}
+                      >
+                        {isActive ? "✓ Active" : "Preview"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onExportClip(short);
+                        }}
+                        disabled={isExporting}
+                        className="px-2.5 py-1 bg-white hover:bg-zinc-200 text-black rounded text-[11px] font-semibold transition-colors disabled:opacity-50 shadow-sm"
+                      >
+                        Export
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // Minimized Widget View (Compact Black & White floating badge)
   if (isMinimized) {
@@ -181,13 +346,15 @@ export const MultiShortDrawer: React.FC<MultiShortDrawerProps> = ({
           >
             🗕
           </button>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg text-xs transition-colors"
-            title="Close drawer"
-          >
-            ✕
-          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg text-xs transition-colors"
+              title="Close drawer"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
